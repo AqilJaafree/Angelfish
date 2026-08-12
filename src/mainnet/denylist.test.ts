@@ -15,6 +15,11 @@ describe('isDenied', () => {
     expect(isDenied(WSTETH)).toBe(true);
   });
 
+  it('excludes large caps that are none of those categories', () => {
+    expect(isDenied('0xf34960d9d60be18cc1d5afc1a6f012a723a28811')).toBe(true); // KCS
+    expect(isDenied('0x4a220e6096b25eadb88358cb44068a3248254675')).toBe(true); // QNT
+  });
+
   it('leaves everything else alone', () => {
     expect(isDenied(NEW_TOKEN)).toBe(false);
   });

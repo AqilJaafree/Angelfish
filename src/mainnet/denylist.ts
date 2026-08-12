@@ -91,6 +91,15 @@ const DEFI_MAJORS = [
   '0xd33526068d116ce69f19a9ee46f0bd304f21a51f', // RPL
 ];
 
+// Large-cap tokens that are none of the above — not a stablecoin, not a wrapped
+// or staked asset, not a DeFi protocol — but established enough that their
+// appearance on a "movers" board is noise rather than news. Exchange tokens and
+// enterprise-chain tokens land here.
+const OTHER_MAJORS = [
+  '0xf34960d9d60be18cc1d5afc1a6f012a723a28811', // KCS  (KuCoin Token, 6 decimals)
+  '0x4a220e6096b25eadb88358cb44068a3248254675', // QNT  (Quant)
+];
+
 // Set MOVERS_DENYLIST_ENABLED=0 to show everything.
 export const DENYLIST_ENABLED = process.env.MOVERS_DENYLIST_ENABLED !== '0';
 
@@ -111,9 +120,14 @@ const ALLOW = new Set(
 );
 
 export const DENYLIST: ReadonlySet<string> = new Set(
-  [...STABLECOINS, ...WRAPPED_MAJORS, ...ETH_DERIVATIVES, ...DEFI_MAJORS, ...EXTRA].filter(
-    (a) => !ALLOW.has(a)
-  )
+  [
+    ...STABLECOINS,
+    ...WRAPPED_MAJORS,
+    ...ETH_DERIVATIVES,
+    ...DEFI_MAJORS,
+    ...OTHER_MAJORS,
+    ...EXTRA,
+  ].filter((a) => !ALLOW.has(a))
 );
 
 // `token` is expected lowercase, as every address in this codebase is — but
