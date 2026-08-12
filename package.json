@@ -1,0 +1,30 @@
+{
+  "name": "angelfish",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Uniswap v3 + v4 ETH-pair swap indexer for Ethereum mainnet",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "once": "tsx src/index.ts --once",
+    "chat-id": "tsx src/telegram/chat-id.ts",
+    "test-post": "tsx src/telegram/test-post.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "pino": "^9.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "pino-pretty": "^11.2.1",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}
