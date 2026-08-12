@@ -27,6 +27,7 @@ import { rsiForSeries } from '../rsi-tag';
 import { resolveTokenMeta, computeFdvUsd } from '../onchain-mcap';
 import { resolveEthUsd } from '../eth-price';
 import { selectByMarketCap } from '../mcap-select';
+import { filterDenied } from '../denylist';
 import { addressAt } from '../decode';
 
 let stateFile = '';
@@ -162,7 +163,18 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
     //    market caps until both groups are full. Ranking all of them is required
     //    because which pools clear the threshold is unknowable until priced; the
     //    walk is what keeps that from costing one lookup per pool per cycle.
-    const ranked = rankTopN(aggregates, aggregates.size);
+    // Drop established tokens (stablecoins, wrapped majors, LSTs, DeFi blue
+    // chips) BEFORE the market-cap walk. They were not just crowding the board,
+    // they were spending its lookup budget: each one consumed a resolver call to
+    // establish a $49B cap nobody needed, against a ceiling of 25 per cycle.
+    const { kept: ranked, dropped } = filterDenied(rankTopN(aggregates, aggregates.size));
+    if (dropped) logger.debug({ dropped }, 'movers-v3: filtered established tokens');
+    if (ranked.length === 0) {
+      state.lastProcessedBlock = currentBlock;
+      saveState(stateFile, state);
+      logger.info({ dropped, fromBlock, currentBlock }, 'movers-v3: only established tokens traded');
+      return { main: [], danger: [], fromBlock, toBlock: currentBlock };
+    }
     // One slot0 read on the USDC/WETH pool prices the whole board. If it fails,
     // every cap this cycle is unknown and every row lands in Danger Zone — loudly,
     // via the warn inside resolveEthUsd — rather than against a stale rate. The

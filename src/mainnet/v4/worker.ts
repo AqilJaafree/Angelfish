@@ -30,6 +30,7 @@ import { rsiForSeries } from '../rsi-tag';
 import { resolveTokenMeta, computeFdvUsd } from '../onchain-mcap';
 import { resolveEthUsd } from '../eth-price';
 import { selectByMarketCap } from '../mcap-select';
+import { filterDenied } from '../denylist';
 
 let stateFile = '';
 let state: V4MoversState;
@@ -175,7 +176,16 @@ export async function moversCycleV4(): Promise<CycleResult | undefined> {
       recordSwapPrice(state.candles, poolId, Math.floor(agg.lastBlock / BLOCKS_PER_CANDLE), price);
     }
 
-    const ranked = rankV4TopN(aggregates, aggregates.size);
+    // See the v3 worker: established tokens are dropped before the market-cap
+    // walk so they neither crowd the board nor spend its lookup budget.
+    const { kept: ranked, dropped } = filterDenied(rankV4TopN(aggregates, aggregates.size));
+    if (dropped) logger.debug({ dropped }, 'movers-v4: filtered established tokens');
+    if (ranked.length === 0) {
+      state.lastProcessedBlock = currentBlock;
+      saveV4State(stateFile, state);
+      logger.info({ dropped, fromBlock, currentBlock }, 'movers-v4: only established tokens traded');
+      return { main: [], danger: [], fromBlock, toBlock: currentBlock };
+    }
     // The ETH/USD anchor is a v3 pool, and V4MoversState has no v3-style PoolMeta
     // cache (its `registry` holds V4PoolMeta, a different shape keyed by poolId) —
     // so its token0() ordering is read directly here rather than forced through a

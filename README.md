@@ -30,7 +30,7 @@ Both versions run the same seven steps. Only steps 1–3 differ between v3 and v
 | 4 | **Aggregate the window** | Σ\|ETH-leg amount\| as volume, unique swappers as traders, fee = tier × input side | same, except the fee **charged on each swap arrives in the event**, so dynamic-fee pools value correctly with no extra call |
 | 5 | **Record a candle** | last `sqrtPriceX96` of the window → a 5-minute (25-block) bucket, forward-filled across tradeless buckets, feeding RSI-14 | same |
 | 6 | **Price the token** | FDV = `totalSupply × price-in-pool × ETH/USD`, with ETH/USD read from the USDC/WETH 0.05% pool's `slot0` | same |
-| 7 | **Split the board** | ≥ `$300k` FDV → main board; below, or unknown → **Danger Zone** | same |
+| 7 | **Split the board** | established tokens dropped, then ≥ `$300k` FDV → main board; below, or unknown → **Danger Zone** | same |
 
 Two properties are what make the boards trustworthy rather than merely populated:
 
@@ -125,6 +125,28 @@ Two traps this path has to avoid, both covered by tests:
 - An empty key can't be detected by a zero `currency0`, because **`address(0)` is
   legitimate** — it's how v4 represents native ETH. Emptiness is judged on
   `tickSpacing`, which every real PoolKey has non-zero.
+
+### Established tokens are filtered by address, never by symbol (`mainnet/denylist.ts`)
+
+Stablecoins, wrapped majors, ETH liquid-staking derivatives and DeFi blue chips are
+excluded. Without it the boards are the same dozen names every cycle — USDC, USDT and
+WBTC alone routinely took three of the five v3 slots — which buries the movement the
+boards exist to surface.
+
+**The match is on address, and that is a correctness requirement rather than a style
+choice.** A symbol is not unique and not authenticated: any contract can name itself
+`USDC`. Matching the string would hide every impostor that picks a blue-chip ticker —
+and a fake `USDC` trading against WETH is precisely what the Danger Zone board is for.
+Symbol matching would turn the filter into a cloaking device for the scams it should
+be surfacing. So an impostor stays on the boards and lands in Danger Zone on its
+market cap like anything else.
+
+The filter runs **before** the market-cap walk, so an excluded token doesn't also
+spend one of the cycle's 25 lookups establishing a $49B cap nobody needed.
+
+Every listed address was verified against its on-chain `symbol()` before being added.
+`MOVERS_DENYLIST` adds more, `MOVERS_ALLOWLIST` forces one back on, and
+`MOVERS_DENYLIST_ENABLED=0` turns the whole thing off.
 
 ### The USD anchor is a pool, not an API
 
@@ -242,6 +264,7 @@ src/
     price.ts  candles.ts  rsi-tag.ts     price series → 5-min candles → RSI
     onchain-mcap.ts         supply/decimals reads + the FDV formula
     eth-price.ts            ETH/USD from the USDC/WETH pool
+    denylist.ts             established-token exclusion, by address
     mcap-select.ts          lazy market-cap walk → main / danger split
     audit.ts                explorer verification + heuristic source scan
     format.ts               stdout board rendering
