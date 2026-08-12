@@ -90,7 +90,7 @@ let warnedUnconfigured = false;
 // window next cycle — re-posting any board that had already succeeded.
 export async function sendBoard(
   board: MoversBoard,
-  kind: 'v3' | 'v4' | 'danger'
+  version: 'v3' | 'v4'
 ): Promise<boolean> {
   if (!board.rows.length) return false;
   if (!isConfigured()) {
@@ -104,16 +104,27 @@ export async function sendBoard(
     return false;
   }
 
-  const { text, topic } =
-    kind === 'v3'
-      ? { text: formatMoversBoardV3(board), topic: V3_TOPIC_ID }
-      : kind === 'v4'
-        ? { text: formatMoversBoardV4(board), topic: V4_TOPIC_ID }
-        : { text: formatDangerZoneBoard(board), topic: DANGER_TOPIC_ID };
+  const versionTopic = version === 'v3' ? V3_TOPIC_ID : V4_TOPIC_ID;
+  const isDanger = board.variant === 'danger';
+  // A Danger Zone board falls back to its OWN version's topic, not to the
+  // chat's General topic. Both boards describe the same version's swaps, so
+  // splitting them across a configured topic and General would scatter one
+  // version's data over two places — and General is where a forum puts
+  // everything nobody routed, which is the wrong home for a routed board.
+  // Set DANGER_ZONE_TOPIC_ID to collect both versions' danger rows in one topic.
+  const topic = isDanger ? (DANGER_TOPIC_ID ?? versionTopic) : versionTopic;
+  const text = isDanger
+    ? formatDangerZoneBoard(board)
+    : version === 'v3'
+      ? formatMoversBoardV3(board)
+      : formatMoversBoardV4(board);
 
   const sent = await sendMessage(text, topic);
   if (sent) {
-    logger.info({ kind, rows: board.rows.length, block: board.block }, 'telegram: board sent');
+    logger.info(
+      { version, variant: board.variant ?? 'main', topic, rows: board.rows.length, block: board.block },
+      'telegram: board sent'
+    );
   }
   return sent;
 }

@@ -92,6 +92,13 @@ export async function moversCycleV4(): Promise<CycleResult | undefined> {
 
     // 1. Sweep v4 Swap logs from the PoolManager singleton. One address, one
     //    topic — every v4 pool on the chain trades through this contract.
+    //
+    // Announced before it runs, for the reason given in the v3 worker: a cold
+    // start is minutes of sequential work that would otherwise log nothing.
+    logger.info(
+      { fromBlock, toBlock: currentBlock, blocks: currentBlock - fromBlock + 1 },
+      'movers-v4: sweeping window'
+    );
     const logs = await rpc.getLogs({
       address: [V4_POOL_MANAGER],
       topics: [V4_SWAP_TOPIC0],
@@ -133,9 +140,14 @@ export async function moversCycleV4(): Promise<CycleResult | undefined> {
     }
 
     // 3. Resolve metadata (cache-first) for the distinct pools that traded.
+    const poolIds = new Set(decoded.map((d) => d.poolId));
+    logger.info(
+      { swaps: decoded.length, pools: poolIds.size },
+      'movers-v4: window swept, resolving pool metadata'
+    );
     const metaById = new Map<string, V4PoolMeta>();
     const now = Date.now();
-    for (const poolId of new Set(decoded.map((d) => d.poolId))) {
+    for (const poolId of poolIds) {
       const meta = await resolveV4PoolMeta(
         poolId,
         state.registry,

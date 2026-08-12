@@ -99,7 +99,7 @@ async function main(): Promise<void> {
       variant: 'danger',
       label: 'Uniswap v4 (ETH) — TEST',
     },
-    'danger'
+    'v4'
   );
   console.log('danger board:', danger ? 'sent' : 'FAILED');
 

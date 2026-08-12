@@ -95,6 +95,16 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
     //    discovered from the logs themselves, which is what makes a newly-created
     //    pool visible on its very first trade. rpc.getLogs chunks the range to the
     //    provider's cap.
+    //
+    // Announce the sweep BEFORE it runs. A cold start clamps to
+    // MAX_LOOKBACK_BLOCKS, which at a 10-block chunk cap is 30 sequential
+    // requests followed by a few hundred pool resolutions — minutes of work.
+    // Without this line that whole stretch emits nothing at all, and a slow
+    // endpoint is indistinguishable from a hung process for as long as it lasts.
+    logger.info(
+      { fromBlock, toBlock: currentBlock, blocks: currentBlock - fromBlock + 1 },
+      'movers-v3: sweeping window'
+    );
     const logs = await rpc.getLogs({
       topics: [V3_SWAP_TOPIC0],
       fromBlock,
@@ -119,8 +129,13 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
 
     // 2. Resolve metadata (cache-first) only for the distinct pools that traded.
     //    This is where v3 forks and non-WETH pools are filtered out.
+    const pools = new Set(decoded.map((d) => d.pool));
+    logger.info(
+      { swaps: decoded.length, pools: pools.size },
+      'movers-v3: window swept, resolving pool metadata'
+    );
     const metaByPool = new Map<string, PoolMeta>();
-    for (const pool of new Set(decoded.map((d) => d.pool))) {
+    for (const pool of pools) {
       const meta = await resolvePoolMeta(pool, state.meta, rpc.call);
       if (meta) metaByPool.set(pool, meta);
     }

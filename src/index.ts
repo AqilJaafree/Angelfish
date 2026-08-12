@@ -25,24 +25,18 @@ async function publish(
 ): Promise<void> {
   if (!result) return;
   const { fromBlock, toBlock } = result;
-  const boards: Array<{ board: MoversBoard; kind: 'v3' | 'v4' | 'danger' }> = [];
+  const boards: MoversBoard[] = [];
   if (result.main.length) {
-    boards.push({
-      board: { rows: result.main, block: toBlock, fromBlock, variant: 'main', label },
-      kind: version,
-    });
+    boards.push({ rows: result.main, block: toBlock, fromBlock, variant: 'main', label });
   }
   if (result.danger.length) {
-    boards.push({
-      board: { rows: result.danger, block: toBlock, fromBlock, variant: 'danger', label },
-      kind: 'danger',
-    });
+    boards.push({ rows: result.danger, block: toBlock, fromBlock, variant: 'danger', label });
   }
-  for (const { board, kind } of boards) {
+  for (const board of boards) {
     console.log(formatBoard(board));
     // sendBoard never throws — a Telegram outage must not stop the next board
     // from posting, and the block cursor has already been advanced by the worker.
-    if (TELEGRAM_ENABLED) await sendBoard(board, kind);
+    if (TELEGRAM_ENABLED) await sendBoard(board, version);
   }
 }
 
