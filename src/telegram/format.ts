@@ -71,6 +71,17 @@ export function auditBadge(verified?: boolean, risk?: RiskLevel): string {
   return ` ${mark}${light}`;
 }
 
+// The headline signal: how far above its own baseline this pool is trading.
+// Rendered with a `×` so it can't be misread as a price or a percentage.
+// undefined means the pool is still warming up a baseline, not that it is flat —
+// so it shows a dash rather than "1×", which would assert something untrue.
+export function formatSpike(spike: number | undefined): string {
+  if (spike == null) return '⏳';
+  if (spike >= 100) return `${Math.round(spike)}×`;
+  if (spike >= 10) return `${spike.toFixed(0)}×`;
+  return `${spike.toFixed(1)}×`;
+}
+
 export function formatRsiTag(
   rsi: number | undefined,
   label: 'oversold' | 'overbought' | undefined
@@ -87,7 +98,8 @@ function renderRow(r: MoversRow, i: number): string {
   const tier = r.feeTier ? ` (${r.feeTier})` : '';
   const link = `<a href="${EXPLORER_BASE}/token/${r.token}">${shortAddr(r.token)}</a>`;
   return (
-    `${medal} <b>${htmlEscape(r.symbol)}</b>${auditBadge(r.verified, r.risk)}${tier} · ` +
+    `${medal} <b>${htmlEscape(r.symbol)}</b> <b>${formatSpike(r.spike)}</b>` +
+    `${auditBadge(r.verified, r.risk)}${tier} · ` +
     `${formatRsiTag(r.rsi, r.rsiLabel)} · ${formatMarketCap(r.marketCapUsd)}\n` +
     `    ${formatWeth(r.volumeWeth, 2)} vol · ${r.swaps} swaps · ${r.traders} traders · ` +
     `${formatWeth(r.feesWeth, 3)} fees\n` +

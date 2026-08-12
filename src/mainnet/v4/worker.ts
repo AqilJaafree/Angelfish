@@ -26,6 +26,7 @@ import { formatFeeTier } from '../format';
 import { MoversRow } from '../../types';
 import { sqrtPriceToSeriesValue } from '../price';
 import { recordSwapPrice } from '../candles';
+import { recordVolume, spikeScore, sortBySpike } from '../volume-history';
 import { rsiForSeries } from '../rsi-tag';
 import { resolveTokenMeta, computeFdvUsd } from '../onchain-mcap';
 import { resolveEthUsd } from '../eth-price';
@@ -169,16 +170,27 @@ export async function moversCycleV4(): Promise<CycleResult | undefined> {
       return { main: [], danger: [], fromBlock, toBlock: currentBlock };
     }
 
+    const windowBlocks = currentBlock - fromBlock + 1;
     for (const [poolId, agg] of aggregates) {
+      const bucket = Math.floor(agg.lastBlock / BLOCKS_PER_CANDLE);
+      // Recorded even when the price is unreadable — see the v3 worker: a gap
+      // in the volume history understates the baseline and inflates the next
+      // score.
+      recordVolume(state.volumes, poolId, bucket, agg.volumeEth, windowBlocks, BLOCKS_PER_CANDLE);
       if (agg.lastSqrtPriceX96 <= 0n) continue;
       const m = metaById.get(poolId)!;
       const price = sqrtPriceToSeriesValue(agg.lastSqrtPriceX96, !m.ethIsCurrency0);
-      recordSwapPrice(state.candles, poolId, Math.floor(agg.lastBlock / BLOCKS_PER_CANDLE), price);
+      recordSwapPrice(state.candles, poolId, bucket, price);
     }
 
-    // See the v3 worker: established tokens are dropped before the market-cap
-    // walk so they neither crowd the board nor spend its lookup budget.
-    const { kept: ranked, dropped } = filterDenied(rankV4TopN(aggregates, aggregates.size));
+    // Ranked by volume spike against each pool's own baseline, then established
+    // tokens dropped before the market-cap walk — see the v3 worker for both.
+    const scoredRanked = sortBySpike(
+      rankV4TopN(aggregates, aggregates.size),
+      (r) => spikeScore(state.volumes[r.poolId], r.volumeEth, windowBlocks),
+      (r) => r.volumeEth
+    );
+    const { kept: ranked, dropped } = filterDenied(scoredRanked);
     if (dropped) logger.debug({ dropped }, 'movers-v4: filtered established tokens');
     if (ranked.length === 0) {
       state.lastProcessedBlock = currentBlock;
@@ -258,6 +270,7 @@ export async function moversCycleV4(): Promise<CycleResult | undefined> {
           rsi: tag?.rsi,
           rsiLabel: tag?.label,
           marketCapUsd: r.marketCapUsd,
+          spike: r.spike,
         });
       }
       return out;

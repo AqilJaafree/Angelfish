@@ -71,7 +71,7 @@ describe('formatBoard', () => {
     const lines = out.split('\n');
     expect(lines[0]).toContain('Uniswap v3 (ETH) — mainnet');
     expect(lines[0]).toContain('blocks 195–200');
-    expect(lines[1]).toBe('🥇 TEST ✅🟢 (0.3%) · RSI — · MC $1.2M');
+    expect(lines[1]).toBe('🥇 TEST ✅🟢 (0.3%) (warming) · RSI — · MC $1.2M');
     expect(lines[2]).toContain('88 swaps');
     expect(lines[2]).toContain('41 traders');
     expect(lines[3]).toBe('    ↳ 0xc02a…6cc2');
@@ -87,6 +87,19 @@ describe('formatBoard', () => {
     });
     expect(out).toContain('Danger Zone');
     expect(out).toContain('Uniswap v4 (ETH)');
+  });
+
+  // The spike multiple is the signal the board ranks on, so it belongs on the
+  // row. A warming-up pool must NOT render "1.0x" — that asserts the pool is
+  // flat, when the truth is that nothing is known about it yet.
+  it('renders the spike multiple, and marks warm-up distinctly from flat', () => {
+    const out = formatBoard({ rows: [{ ...base, spike: 22.4 }], block: 2, fromBlock: 1 });
+    expect(out).toContain('22x');
+    const flat = formatBoard({ rows: [{ ...base, spike: 1.03 }], block: 2, fromBlock: 1 });
+    expect(flat).toContain('1.0x');
+    const warming = formatBoard({ rows: [base], block: 2, fromBlock: 1 });
+    expect(warming).toContain('(warming)');
+    expect(warming).not.toContain('1.0x');
   });
 
   it('renders a v4 dynamic tier as-is', () => {

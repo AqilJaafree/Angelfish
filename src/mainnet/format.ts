@@ -56,6 +56,14 @@ export function formatRsi(row: MoversRow): string {
   return `RSI ${row.rsi}${label}`;
 }
 
+// Mirrors telegram/format.ts — see the note there on why an unscored row shows
+// a marker rather than "1x".
+export function formatSpike(spike: number | undefined): string {
+  if (spike == null) return '(warming)';
+  if (spike >= 10) return `${spike.toFixed(0)}x`;
+  return `${spike.toFixed(1)}x`;
+}
+
 const MEDALS = ['🥇', '🥈', '🥉'];
 
 function shortAddr(a: string): string {
@@ -71,7 +79,7 @@ export function formatRow(row: MoversRow, index: number): string {
     `${rank} ${row.symbol}${badges ? ` ${badges}` : ''}`,
     row.feeTier ? `(${row.feeTier})` : '',
   ].filter(Boolean);
-  const line1 = `${parts.join(' ')} · ${formatRsi(row)} · ${formatUsd(row.marketCapUsd)}`;
+  const line1 = `${parts.join(' ')} ${formatSpike(row.spike)} · ${formatRsi(row)} · ${formatUsd(row.marketCapUsd)}`;
   const line2 = `    ${formatEth(row.volumeWeth)} vol · ${row.swaps} swaps · ${row.traders} traders · ${formatEth(row.feesWeth)} fees`;
   const line3 = `    ↳ ${shortAddr(row.token)}`;
   return [line1, line2, line3].join('\n');

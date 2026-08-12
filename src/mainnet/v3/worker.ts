@@ -23,6 +23,7 @@ import {
 } from '../config';
 import { sqrtPriceToSeriesValue } from '../price';
 import { recordSwapPrice } from '../candles';
+import { recordVolume, spikeScore, sortBySpike } from '../volume-history';
 import { rsiForSeries } from '../rsi-tag';
 import { resolveTokenMeta, computeFdvUsd } from '../onchain-mcap';
 import { resolveEthUsd } from '../eth-price';
@@ -150,24 +151,43 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
       return { main: [], danger: [], fromBlock, toBlock: currentBlock };
     }
 
-    // Record a 5-min candle sample for EVERY pool that traded this window
-    // (continuity — not just the top-N), keyed by block-count bucket.
+    // Record a 5-min candle sample and a volume sample for EVERY pool that
+    // traded this window (continuity — not just the top-N), keyed by
+    // block-count bucket.
+    const windowBlocks = currentBlock - fromBlock + 1;
     for (const [pool, agg] of aggregates) {
+      const bucket = Math.floor(agg.lastBlock / BLOCKS_PER_CANDLE);
+      // Volume history is recorded even when the price is unreadable — the
+      // spike ranking needs a continuous baseline, and skipping a window here
+      // would understate the pool's normal activity and inflate its next score.
+      recordVolume(state.volumes, pool, bucket, agg.volumeWeth, windowBlocks, BLOCKS_PER_CANDLE);
       if (agg.lastSqrtPriceX96 <= 0n) continue;
       const m = metaByPool.get(pool)!;
       const price = sqrtPriceToSeriesValue(agg.lastSqrtPriceX96, !m.wethIsToken0);
-      recordSwapPrice(state.candles, pool, Math.floor(agg.lastBlock / BLOCKS_PER_CANDLE), price);
+      recordSwapPrice(state.candles, pool, bucket, price);
     }
 
-    // 4. Rank EVERY pool that traded, then walk down in volume order resolving
-    //    market caps until both groups are full. Ranking all of them is required
+    // 4. Rank EVERY pool that traded, then walk down that order resolving market
+    //    caps until both groups are full. Ranking all of them is required
     //    because which pools clear the threshold is unknowable until priced; the
     //    walk is what keeps that from costing one lookup per pool per cycle.
-    // Drop established tokens (stablecoins, wrapped majors, LSTs, DeFi blue
-    // chips) BEFORE the market-cap walk. They were not just crowding the board,
-    // they were spending its lookup budget: each one consumed a resolver call to
-    // establish a $49B cap nobody needed, against a ceiling of 25 per cycle.
-    const { kept: ranked, dropped } = filterDenied(rankTopN(aggregates, aggregates.size));
+    //
+    // Established tokens are dropped BEFORE that walk. They were not just
+    // crowding the board, they were spending its lookup budget: each one
+    // consumed a resolver call to establish a $49B cap nobody needed, against a
+    // ceiling of 25 per cycle.
+    //
+    // Rank by how far each pool is trading above its OWN recent baseline, not
+    // by absolute volume. Absolute volume is near-constant per pool — the
+    // biggest pool is the biggest pool on almost every window — so ranking on
+    // it reports the same handful of names forever. Pools without enough
+    // history to score fall back to volume order behind the scored ones.
+    const scoredRanked = sortBySpike(
+      rankTopN(aggregates, aggregates.size),
+      (r) => spikeScore(state.volumes[r.pool], r.volumeWeth, windowBlocks),
+      (r) => r.volumeWeth
+    );
+    const { kept: ranked, dropped } = filterDenied(scoredRanked);
     if (dropped) logger.debug({ dropped }, 'movers-v3: filtered established tokens');
     if (ranked.length === 0) {
       state.lastProcessedBlock = currentBlock;
@@ -255,6 +275,7 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
           rsi: tag?.rsi,
           rsiLabel: tag?.label,
           marketCapUsd: r.marketCapUsd,
+          spike: r.spike,
         });
       }
       return out;

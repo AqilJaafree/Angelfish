@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { PoolMeta } from './swaps';
 import { CandleState } from '../candles';
+import { VolumeState } from '../volume-history';
 import { AuditResult } from '../../types';
 import { TokenMeta } from '../onchain-mcap';
 import { EthUsdState } from '../eth-price';
@@ -15,6 +16,7 @@ export interface MoversState {
   suppliesCheckedAt: Record<string, number>; // token -> ms epoch (TTLs ALL entries)
   ethUsd?: EthUsdState;
   candles: Record<string, CandleState>; // pool -> 5-min candle state
+  volumes: Record<string, VolumeState>; // pool -> bucketed volume, feeds the spike rank
 }
 
 function empty(): MoversState {
@@ -27,6 +29,7 @@ function empty(): MoversState {
     supplies: {},
     suppliesCheckedAt: {},
     candles: {},
+    volumes: {},
   };
 }
 

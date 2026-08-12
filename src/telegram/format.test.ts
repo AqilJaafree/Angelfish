@@ -132,6 +132,22 @@ describe('auditBadge', () => {
   });
 });
 
+describe('spike rendering', () => {
+  it('shows the multiple the board ranks on', () => {
+    expect(formatMoversBoardV3({ ...board, rows: [{ ...row, spike: 22.4 }] })).toContain('22×');
+    expect(formatMoversBoardV3({ ...board, rows: [{ ...row, spike: 3.25 }] })).toContain('3.3×');
+    expect(formatMoversBoardV3({ ...board, rows: [{ ...row, spike: 999 }] })).toContain('999×');
+  });
+
+  // "1.0×" would assert the pool is flat; the truth during warm-up is that
+  // nothing is known about it yet. Those are different claims.
+  it('marks a warming-up pool distinctly from a flat one', () => {
+    const warming = formatMoversBoardV3({ ...board, rows: [row] });
+    expect(warming).toContain('⏳');
+    expect(warming).not.toContain('1.0×');
+  });
+});
+
 describe('board rendering', () => {
   it('renders an HTML row with a clickable token link', () => {
     const out = formatMoversBoardV3(board);
