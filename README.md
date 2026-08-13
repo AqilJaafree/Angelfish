@@ -258,6 +258,29 @@ railway up
 `Dockerfile` builds and runs `npm start`. Set at minimum `TELEGRAM_BOT` and
 `TELEGRAM_CHAT_ID`; everything else has a working default.
 
+### Two services, one image
+
+The project runs **two** Railway services from this same repo:
+
+| Service | Start command | What it does |
+|---|---|---|
+| `angelfish` | Dockerfile `CMD` (`node dist/index.js`) | the indexer — sweeps and posts boards |
+| `angelfish-lp` | `node dist/lp/bot.js` (override) | the LP bot — DM-gated, signs via KeeperHub |
+
+The start-command override on `angelfish-lp` is **load-bearing**. Without it the second
+service would inherit the Dockerfile's `CMD` and run a *second indexer*, double-posting
+every board and racing on the state files. Set it before the first deploy, not after.
+
+The bot runs `node dist/lp/bot.js` rather than `npm run lp-bot` because the image runs
+`npm prune --omit=dev` and `tsx` is a dev dependency — the `lp-bot` script works locally
+and would fail in the container. `start:lp` is the deployed entrypoint.
+
+Only the indexer needs the volume; the bot holds no state worth keeping — pending
+plans are deliberately in-memory (see above).
+
+**Do not run the bot locally while the deployed one is up.** Two processes polling
+`getUpdates` on the same token conflict, and Telegram will 409 one of them.
+
 **Attach a volume** if you want the block cursor and caches to survive a redeploy —
 mount it at `/app/tmp` (or point `STATE_DIR` elsewhere). Without one the state files
 are lost on each deploy and the next cycle starts from a fresh
@@ -321,6 +344,143 @@ src/
     chat-id.ts              `npm run chat-id`
     test-post.ts            `npm run test-post`
 ```
+
+## LP bot (`npm run lp-bot`)
+
+A second, independent process: a Telegram DM bot that opens **Uniswap v3 positions on
+Ethereum mainnet**, signing through KeeperHub. It shares nothing with the indexer but
+the `.env` and the logger — the indexer never writes, and the bot never indexes.
+
+```bash
+npm run lp-bot
+```
+
+```
+/pool  USDC WETH 500                     pool price and tick
+/lp    USDC WETH 500 100 0.03 10         quote a ±10% position
+/lp    USDC WETH 500 0 0.00035           single-sided WETH (see below)
+/wrap  0.00035                           ETH -> WETH
+/confirm 7KQ4MX                          execute it
+/positions /wallet /status /cancel /help
+```
+
+### Single-sided positions
+
+A wallet holding only one of the two tokens can still LP: pass `0` for the other
+amount and the range is placed entirely on one side of the price, so only the token
+you hold is required.
+
+Direction is the whole correctness question, and v3 fixes it:
+
+```
+currentTick <  tickLower  -> position is 100% token0
+currentTick >= tickUpper  -> position is 100% token1
+```
+
+So a **token1-only** position needs the range **below** the current tick, and
+token0-only needs it **above**. Reversing this asks for the token the wallet does not
+hold and reverts with `STF`. `plan.ts` infers the side from whichever amount is zero
+rather than making you say it.
+
+The gap between the current price and the near edge (`offsetPct`, default 1%) is not
+cosmetic. With no gap, any price drift between quote and inclusion pulls the current
+tick inside the range, which makes the mint demand *both* tokens and revert.
+
+Economically a single-sided position is a **limit order**: WETH placed below the price
+in a USDC/WETH pool sells into USDC as ETH rises through the band.
+
+Wrapping is a separate step because raw ETH is not an ERC20 and cannot be deposited
+into a pool — `/wrap` calls WETH's payable `deposit()`.
+
+### Authorisation is by numeric id, never by username
+
+Exactly one account can command the bot — the numeric Telegram id in
+`LP_OWNER_TELEGRAM_ID` — and only in a **private chat**. Both gates are enforced in
+`lp/auth.ts` and covered by tests.
+
+Matching on `from.username` would be a real vulnerability rather than a style choice.
+Telegram usernames are mutable and can be released and re-registered by anyone; a bot
+that signs transactions must not treat one as a credential, or changing the username
+would hand the wallet to whoever claims it next. `LP_OWNER_USERNAME` is optional and
+is compared only to raise a log warning when it stops matching the id. The DM
+requirement is the second gate: a group message's apparent sender can be impersonated
+by display name.
+
+The owner id has **no default**, so an unconfigured deployment refuses every message
+rather than falling open. It is also deliberately absent from this repository: the
+owner's identity is a secret of the deployment, so it lives only in the gitignored
+`.env`, and no tracked file — including the tests — names the account.
+
+Both rejections return identical text, so replies can't be used to probe who the owner is.
+
+### Nothing broadcasts without a confirm
+
+`/lp` only ever **simulates**. It reads the pool, builds the tick range, checks existing
+allowances, simulates each step, and stores the plan behind a six-character code.
+`/confirm <code>` is what signs.
+
+Confirm codes are **single-use and expire in five minutes**, held in memory so they do
+not survive a restart. Single-use is the property that matters: a replayed confirm
+would mint a second position just as successfully as the first. The TTL exists because
+a quote pins a tick range derived from a price that moves. Each step also carries an
+idempotency key (`lp-<code>-<index>`), so a retry after a timeout cannot double-broadcast.
+
+### The two traps this path has to avoid
+
+- **A tuple argument must be passed to KeeperHub as an object.** `mint` takes a
+  `MintParams` struct; sending it as a nested array double-nests and fails with
+  `invalid address (argument="token0")`. `buildMintParams` returns an object for
+  exactly this reason.
+- **Ticks are logarithmic.** A ±10% band is `ln(1.10)/ln(1.0001)` ≈ 953 ticks wide
+  *wherever the pool currently sits*. Treating the percentage as linear in tick space
+  would be wildly wrong on mainnet USDC/WETH, which trades near tick 200,000. Both
+  bounds are then aligned to the tier's `tickSpacing` — lower down, upper up — because
+  an unaligned range reverts.
+
+### Why it talks MCP rather than REST
+
+KeeperHub exposes direct execution **only** over its MCP endpoint. The public
+`/openapi.json` documents just listed marketplace workflows
+(`/api/mcp/workflows/<slug>/call`) — there is no REST route for `execute_contract_call` —
+so `lp/keeperhub.ts` speaks MCP JSON-RPC over HTTP, handshake included, and handles
+both the JSON and SSE response shapes.
+
+It also normalises a KeeperHub quirk worth knowing: a read returns a **named object**
+when the ABI outputs are named (`slot0` → `{ sqrtPriceX96, tick, … }`) but a bare
+scalar when they are not (`totalSupply` → `"9184992…"`). `readFields` and `readScalar`
+each assert the shape they expect rather than guessing.
+
+### Uniswap v3, not v4 — deliberately
+
+v3's `mint` is a flat tuple on a well-known `NonfungiblePositionManager`. v4 LP goes
+through `PositionManager.modifyLiquidities`, which takes encoded action sequences plus
+Permit2 approvals — far harder to drive through a generic contract-call tool. Note this
+means the boards and the bot point at different protocols: the boards index v4, the bot
+LPs into v3.
+
+### Before it can execute
+
+Three values, all in the gitignored `.env`, and none of them defaulted:
+
+1. `KEEPERHUB_API_KEY` — create a `kh_…` key in the KeeperHub dashboard.
+2. `LP_OWNER_TELEGRAM_ID` — without it the bot refuses every message.
+3. `LP_WALLET_ADDRESS` — the address behind the KeeperHub wallet integration.
+
+Gas is **sponsored by KeeperHub**: executions route through a relayer, and the wallet's
+ETH balance falls only by the value actually sent, not by gas. So the wallet needs the
+assets it intends to deposit, but not a gas float.
+
+### Proven on mainnet
+
+The path is not theoretical — this exact code opened a live position:
+
+| | |
+|---|---|
+| wrap `deposit()` | [`0x5f977a54…`](https://etherscan.io/tx/0x5f977a5484efaca4be2487cf40a59fae84aaca629fbe85739787ed05cb489294) |
+| `mint` | [`0x1384bd7c…`](https://etherscan.io/tx/0x1384bd7c666281756574351b2ff7fc0fc81c0b77c6a00a0a26b37036dd27d985) |
+| position | tokenId **1349240**, USDC/WETH 0.05%, ticks 200260–200740, liquidity 646,075,971,053 |
+
+`singleSidedTicks` carries a regression test pinned to that exact range.
 
 ## Known limits
 

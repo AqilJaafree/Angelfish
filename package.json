@@ -15,7 +15,9 @@
     "test-post": "tsx src/telegram/test-post.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lp-bot": "tsx src/lp/bot.ts",
+    "start:lp": "node dist/lp/bot.js"
   },
   "dependencies": {
     "pino": "^9.4.0"
