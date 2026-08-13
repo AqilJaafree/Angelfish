@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  MAX_TICK, MIN_TICK, alignTick, applySlippage, buildMintParams, fromBaseUnits,
-  priceFromSqrt, rangeTicks, resolveToken, singleSidedTicks, sortTokens, toBaseUnits,
+  MAX_TICK, MAX_UINT128, MIN_TICK, alignTick, applySlippage, buildMintParams, fromBaseUnits,
+  knownToken, positionAmounts, priceFromSqrt, rangeTicks, resolveToken, singleSidedTicks,
+  sortTokens, sqrtRatioAtTickX96, toBaseUnits,
 } from './uniswap';
 
 describe('resolveToken', () => {
@@ -161,6 +162,83 @@ describe('singleSidedTicks', () => {
     expect(() => singleSidedTicks(CUR, 'token1', 1, 5, 1234)).toThrow(/fee tier/);
     expect(() => singleSidedTicks(CUR, 'token1', 0, 5, 500)).toThrow(/offset/);
     expect(() => singleSidedTicks(CUR, 'token1', 1, 0, 500)).toThrow(/width/);
+  });
+});
+
+describe('knownToken', () => {
+  it('maps a known address back to its symbol and decimals', () => {
+    expect(knownToken('0xA0b86991c6218b36c1D19D4a2e9Eb0cE3606eB48')).toEqual({
+      address: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', decimals: 6, symbol: 'USDC',
+    });
+  });
+  it('is undefined for an address not in the alias table', () => {
+    expect(knownToken('0x1111111111111111111111111111111111111111')).toBeUndefined();
+  });
+});
+
+describe('positionAmounts', () => {
+  const at = sqrtRatioAtTickX96;
+
+  // Direction is the correctness question again, mirrored: v3 pays out 100%
+  // token0 when price is BELOW the range and 100% token1 when it is above.
+  it('is all token0 when the price sits below the range', () => {
+    const { amount0, amount1 } = positionAmounts(10n ** 12n, 1000, 2000, at(500));
+    expect(amount1).toBe(0n);
+    expect(amount0).toBeGreaterThan(0n);
+  });
+
+  it('is all token1 when the price sits above the range', () => {
+    const { amount0, amount1 } = positionAmounts(10n ** 12n, 1000, 2000, at(3000));
+    expect(amount0).toBe(0n);
+    expect(amount1).toBeGreaterThan(0n);
+  });
+
+  it('holds both sides when the price sits inside the range', () => {
+    const { amount0, amount1 } = positionAmounts(10n ** 12n, 1000, 2000, at(1500));
+    expect(amount0).toBeGreaterThan(0n);
+    expect(amount1).toBeGreaterThan(0n);
+  });
+
+  // Regression against the real position this repo opened on mainnet: tokenId
+  // 1349240, USDC/WETH 0.05%, ticks 200260–200740, liquidity 646,075,971,053,
+  // funded single-sided with 0.00035 WETH. Price was above the range (tick
+  // 200843), so the whole position must value as WETH — and back out at very
+  // close to what went in.
+  it('reproduces the deposit of the executed mainnet position', () => {
+    const { amount0, amount1 } = positionAmounts(646_075_971_053n, 200260, 200740, at(200843));
+    expect(amount0).toBe(0n);
+    const weth = Number(amount1) / 1e18;
+    expect(weth).toBeGreaterThan(0.00034);
+    expect(weth).toBeLessThan(0.00036);
+  });
+
+  it('scales linearly with liquidity, so a 50% exit is half the value', () => {
+    const full = positionAmounts(10n ** 12n, 1000, 2000, at(1500));
+    const half = positionAmounts(5n * 10n ** 11n, 1000, 2000, at(1500));
+    expect(Number(half.amount0) / Number(full.amount0)).toBeCloseTo(0.5, 6);
+    expect(Number(half.amount1) / Number(full.amount1)).toBeCloseTo(0.5, 6);
+  });
+
+  it('returns zero for zero liquidity rather than dividing by anything', () => {
+    expect(positionAmounts(0n, 1000, 2000, at(1500))).toEqual({ amount0: 0n, amount1: 0n });
+  });
+
+  // A zero price would divide by zero in the token0 leg if it were not clamped
+  // into the range first.
+  it('survives a zero pool price by clamping into the range', () => {
+    expect(() => positionAmounts(10n ** 12n, 1000, 2000, 0n)).not.toThrow();
+    expect(positionAmounts(10n ** 12n, 1000, 2000, 0n).amount1).toBe(0n);
+  });
+
+  it('rejects an inverted range', () => {
+    expect(() => positionAmounts(1n, 2000, 1000, at(1500))).toThrow(/empty range/);
+  });
+});
+
+describe('MAX_UINT128', () => {
+  // collect() takes uint128 maxima; anything larger silently overflows the type.
+  it('is exactly the uint128 maximum', () => {
+    expect(MAX_UINT128).toBe(340282366920938463463374607431768211455n);
   });
 });
 

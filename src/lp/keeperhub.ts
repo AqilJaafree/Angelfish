@@ -191,6 +191,73 @@ export async function readScalar(
   return String(raw ?? '');
 }
 
+// --- Execution history (the audit trail) ---
+//
+// KeeperHub records every execution it signs, server-side and outliving any
+// redeploy of this bot, which makes it the authoritative record of what the
+// wallet actually did rather than what this process remembers doing.
+
+export interface ExecutionRun {
+  id: string;
+  source?: string;
+  status?: string;
+  startedAt?: string;
+  completedAt?: string;
+  directType?: string;
+  network?: string;
+  gasCostWei?: string;
+  transactionHashes?: Array<{ hash?: string; network?: string }>;
+  error?: string | null;
+}
+
+// Most recent executions, newest first.
+//
+// The `source` filter is NOT sent, deliberately. Passing `source: 'direct'`
+// answers `{ runs: [], total: 6 }` — the count is right and the page is empty —
+// while the same request without it returns all six, every one of them already
+// carrying `source: 'direct'`. So the filtering happens here, where it works.
+export async function listExecutions(limit = 10): Promise<ExecutionRun[]> {
+  const res = await callTool<{ runs?: ExecutionRun[] }>('list_executions', {
+    limit: Math.min(Math.max(limit, 1), 100),
+  });
+  return (res.runs ?? []).filter((r) => r.source === 'direct');
+}
+
+export interface ExecutionDetail {
+  functionName?: string;
+  contractAddress?: string;
+  transactionHash?: string;
+  blockNumber?: number;
+  gasUnits?: string;
+  sponsored?: boolean;
+  reverted?: boolean;
+}
+
+// The per-execution detail. A run in the list carries a hash but not what was
+// CALLED, and `burn` versus `mint` is the whole point of reading a trail — so
+// the function name costs one extra round trip per row and is worth it.
+export async function executionDetail(id: string): Promise<ExecutionDetail> {
+  const raw = await callTool<{
+    transactionHash?: string;
+    receipts?: Array<{ blockNumber?: number; gasUsed?: string }>;
+    result?: {
+      sponsored?: boolean;
+      gasUsedUnits?: string;
+      executedCall?: { functionName?: string; contractAddress?: string; reverted?: boolean };
+    };
+  }>('get_direct_execution_status', { execution_id: id });
+  const call = raw.result?.executedCall;
+  return {
+    functionName: call?.functionName,
+    contractAddress: call?.contractAddress,
+    transactionHash: raw.transactionHash,
+    blockNumber: raw.receipts?.[0]?.blockNumber,
+    gasUnits: raw.result?.gasUsedUnits ?? raw.receipts?.[0]?.gasUsed,
+    sponsored: raw.result?.sponsored,
+    reverted: call?.reverted,
+  };
+}
+
 // A state-changing call. `simulate` MUST be a JSON boolean — KeeperHub rejects
 // the string "true" — and a simulation is always run before the real send.
 export async function write(

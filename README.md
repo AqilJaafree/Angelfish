@@ -1,11 +1,21 @@
 # angelfish
 
-Uniswap **v3 + v4** ETH-pair swap indexer for **Ethereum mainnet**.
+Uniswap **v3 + v4** on **Ethereum mainnet**, in two independent processes that
+share nothing but a `.env` and a logger:
 
-It sweeps Swap logs in a rolling block window, works out which pools are ETH-paired,
-aggregates per-token trading activity, prices each token on-chain, and ranks the
-result into a Top Movers board plus a Danger Zone board for anything below the
-market-cap gate. Boards print to stdout and post to Telegram.
+| | What it does | Run it |
+|---|---|---|
+| **the indexer** | reads the chain — sweeps Swap logs, ranks tokens onto a Top Movers board and a Danger Zone board, posts to Telegram | `npm start` |
+| **the LP bot** | writes to the chain — a DM-only Telegram bot that opens and closes Uniswap v3 positions, signing through KeeperHub | `npm run start:lp` |
+
+The indexer never signs anything and the bot never indexes. Note they point at
+different protocols on purpose: the boards index **v4**, the bot LPs into **v3**
+([why](#uniswap-v3-not-v4--deliberately)).
+
+The indexer sweeps Swap logs in a rolling block window, works out which pools are
+ETH-paired, aggregates per-token trading activity, prices each token on-chain, and
+ranks the result into a Top Movers board plus a Danger Zone board for anything below
+the market-cap gate. Boards print to stdout and post to Telegram.
 
 ## Quick start
 
@@ -343,6 +353,17 @@ src/
     sender.ts               Bot API sendMessage over fetch, no dependency
     chat-id.ts              `npm run chat-id`
     test-post.ts            `npm run test-post`
+  lp/                       the LP bot — a separate process, signs via KeeperHub
+    bot.ts                  long-poll loop; `npm run start:lp`
+    auth.ts                 the whole authorisation surface, one pure function
+    commands.ts             command routing and replies
+    config.ts               mainnet addresses, tick spacings, owner id
+    keeperhub.ts            MCP JSON-RPC client: reads, writes, execution history
+    uniswap.ts              tick maths, amounts, ABIs, unit conversion
+    plan.ts                 quote → simulate → execute, for both entry and exit
+    pending.ts              single-use confirm codes, in memory on purpose
+    audit.ts                token verification + source scan before you fund it
+    trail.ts                `/history` — the audit trail, read from KeeperHub
 ```
 
 ## LP bot (`npm run lp-bot`)
@@ -360,9 +381,144 @@ npm run lp-bot
 /lp    USDC WETH 500 100 0.03 10         quote a ±10% position
 /lp    USDC WETH 500 0 0.00035           single-sided WETH (see below)
 /wrap  0.00035                           ETH -> WETH
+/exit                                    list positions, pick one to close
+/exit  1                                 close the first one entirely
+/exit  1 50                              take out half of it
+/audit 0x4691…5d4b                       verification + source scan
+/history                                 what this wallet has signed
 /confirm 7KQ4MX                          execute it
 /positions /wallet /status /cancel /help
 ```
+
+### What we use KeeperHub for
+
+KeeperHub holds the key and signs, so **this project never touches a private
+key** — there is no mnemonic, no keystore and no signing library anywhere in it.
+Everything the bot does on-chain is one of these calls:
+
+| KeeperHub tool | What we use it for | Where |
+|---|---|---|
+| `execute_contract_call` — read | pool price and tick, token decimals/symbol, balances, allowances, position state | `keeperhub.ts` `read` / `readFields` / `readScalar` |
+| `execute_contract_call` — `simulate: true` | every step of a plan, before anything is signed | `plan.ts` `simulate()` |
+| `execute_contract_call` — write | `approve`, `mint`, `decreaseLiquidity`, `collect`, `burn`, WETH `deposit` | `plan.ts` `execute()` |
+| `idempotency_key` | stops a retry after a timeout broadcasting the same mint twice — keyed `lp-<code>-<index>` | `keeperhub.ts` `write()` |
+| sponsored gas | executions route through a relayer, so the wallet needs the assets it deposits but **no gas float** | — |
+| `list_executions` | the `/history` audit trail | `trail.ts` |
+| `get_direct_execution_status` | each trail row's function name, block and receipt | `trail.ts` |
+
+Three quirks worth knowing, each commented at its call site:
+
+- **A tuple argument must be an object.** `mint`, `decreaseLiquidity` and
+  `collect` all take structs; sending one as a nested array double-nests and
+  fails with `invalid address (argument="token0")`.
+- **`simulate` must be a JSON boolean.** The string `"true"` is rejected.
+- **A read returns a named object when the ABI outputs are named** (`slot0` →
+  `{ sqrtPriceX96, tick, … }`) **and a bare scalar when they are not**
+  (`totalSupply` → `"9184992…"`). `readFields` and `readScalar` each assert the
+  shape they expect rather than guessing.
+
+Worked end to end on mainnet — [the transactions](#proven-on-mainnet).
+
+### The audit trail comes from KeeperHub, not from memory
+
+`/history` reads the execution record back from KeeperHub rather than from
+anything this process kept:
+
+```
+🧾 audit trail — last 6, newest first
+✅ burn · position manager · 2026-08-13 09:15Z
+     0x80a7d0cf… · block 25,745,135 · 100,065 gas · sponsored
+✅ collect · position manager · 2026-08-13 09:14Z
+     0xc64ede69… · block 25,745,134 · 90,117 gas · sponsored
+…
+```
+
+The bot holds no durable state by design, so a locally accumulated trail would
+reset on every redeploy — and a trail with silent gaps is worse than none,
+because it reads as complete. KeeperHub's record is server-side, survives
+redeploys, and is the same record that settled whether each transaction landed.
+
+Two things the endpoint requires care with, both commented at the call site:
+
+- **The `source` filter does not work.** Asking for `source: 'direct'` answers
+  `{ runs: [], total: 6 }` — right count, empty page — while the unfiltered
+  request returns all six, every one already carrying `source: 'direct'`. So the
+  filtering is done client-side.
+- **The list says a call happened, not what was called.** `burn` versus `mint`
+  is the entire value of a trail, so each row costs one extra
+  `get_direct_execution_status` to resolve its function name. A detail lookup
+  that fails degrades to a row that still testifies the execution happened.
+
+### Tokens are audited against their verified source before you fund them
+
+`/lp` accepts a raw address anywhere a symbol goes, which means it will happily
+quote a position in a contract nobody has ever read. So the same explorer
+verification and heuristic source scan the boards use (`mainnet/audit.ts`) runs
+on the pair first, and the verdict prints **above** the plan — in front of the
+decision rather than as a footnote to it:
+
+```
+token audit
+⚠️⬜ FOO 0x1234…5678
+⚠️ FOO has no published source — nobody can read what it does.
+```
+
+It informs, it does not block: `/confirm` is already the gate between a quote
+and a signature, and the boards' stance throughout is to surface a verdict
+rather than hide the token.
+
+**Only tokens outside the curated alias table are audited automatically**, and
+that is calibration rather than laziness. The scan was tuned against memecoin
+launches; on blue chips it fires on things that are normal for them. Checked
+live, USDC returns `✅🔴 upgradeable` — correct per the rules, and useless above
+every routine USDC/WETH quote, where it would train the reader to ignore the one
+badge that matters. `/audit <token>` runs it on anything explicitly, majors
+included, and carries the caveat with it.
+
+Unlike the boards, which have room for one glyph per row, `/audit` reports the
+**flags** that fired (`has-mint`, `upgradeable`, `owner-privileged`) — a caller
+about to commit funds wants to know *why* it is red. `AuditResult.flags` is
+optional, so results cached by an earlier build stay readable.
+
+### Exiting is by slot number, not token id
+
+`/exit` with no arguments lists the open positions and numbers them; `/exit 1`
+closes the first. Nobody should have to read a seven-digit tokenId off a phone
+screen and type it back, which is the only thing the position manager itself
+understands.
+
+So a small number is always a **position slot**, never a token id. A number
+larger than the list is refused rather than reinterpreted — guessing would
+target an unrelated position — and the reply spells out the explicit form,
+`/exit #1349240`, for the case where a raw id really is what was meant. The
+plan then shows which position it resolved to before `/confirm` signs anything.
+
+A withdrawal is three steps in a fixed order, because `burn` reverts unless both
+the liquidity and both owed balances are already zero:
+
+```
+decreaseLiquidity  ->  collect  ->  burn   (burn only on a full exit)
+```
+
+`collect` passes `uint128` maxima to sweep the principal *and* every fee accrued
+since the position was opened. A partial exit stops after the collect and leaves
+the NFT alive.
+
+**`amountMin` is derived, not left at zero.** `positionAmounts` values the
+liquidity at the pool's current price and the configured slippage comes off
+that. A zero floor would let the price be pushed before inclusion so the exit
+settles into whichever side an attacker prefers — the mirror image of the guard
+the mint path already carries. The tick→price conversion there is floating
+point rather than a port of Uniswap's `TickMath`: its output feeds a bound that
+then has a whole percent subtracted from it, so a ~1e-15 relative error cannot
+move the result. It carries a regression test against the real position this
+repo opened — 646,075,971,053 liquidity over ticks 200260–200740 values back out
+at the 0.00035 WETH that went in.
+
+Each step simulates against the position as it stands, so `collect` and `burn`
+report a revert while the withdraw ahead of them is still pending. That is an
+artefact of independent simulation, not a failure, and the reply says so rather
+than leaving it to be guessed at.
 
 ### Single-sided positions
 
@@ -415,9 +571,9 @@ Both rejections return identical text, so replies can't be used to probe who the
 
 ### Nothing broadcasts without a confirm
 
-`/lp` only ever **simulates**. It reads the pool, builds the tick range, checks existing
-allowances, simulates each step, and stores the plan behind a six-character code.
-`/confirm <code>` is what signs.
+`/lp` and `/exit` only ever **simulate**. They read the pool, build the tick range or
+value the liquidity, check existing allowances, simulate each step, and store the plan
+behind a six-character code. `/confirm <code>` is what signs.
 
 Confirm codes are **single-use and expire in five minutes**, held in memory so they do
 not survive a restart. Single-use is the property that matters: a replayed confirm
@@ -472,15 +628,52 @@ assets it intends to deposit, but not a gas float.
 
 ### Proven on mainnet
 
-The path is not theoretical — this exact code opened a live position:
+The path is not theoretical — this exact code opened a live position and later
+closed it, so the **round trip** is proven rather than just the entry. Every
+transaction below was signed by the bot through KeeperHub, and all six gas
+sponsored.
 
-| | |
-|---|---|
-| wrap `deposit()` | [`0x5f977a54…`](https://etherscan.io/tx/0x5f977a5484efaca4be2487cf40a59fae84aaca629fbe85739787ed05cb489294) |
-| `mint` | [`0x1384bd7c…`](https://etherscan.io/tx/0x1384bd7c666281756574351b2ff7fc0fc81c0b77c6a00a0a26b37036dd27d985) |
-| position | tokenId **1349240**, USDC/WETH 0.05%, ticks 200260–200740, liquidity 646,075,971,053 |
+**Opening the position** — `/wrap 0.00035` then `/lp USDC WETH 500 0 0.00035`:
 
-`singleSidedTicks` carries a regression test pinned to that exact range.
+| Step | Transaction | Block | Gas |
+|---|---|---|---|
+| WETH `deposit()` — ETH is not an ERC20, so it must be wrapped first | [`0x5f977a54…`](https://etherscan.io/tx/0x5f977a5484efaca4be2487cf40a59fae84aaca629fbe85739787ed05cb489294) | 25,744,442 | 101,165 |
+| `approve` WETH → position manager | [`0xdc80f7c4…`](https://etherscan.io/tx/0xdc80f7c455caea5218fc420f227b3e7e2b2cb74b889c618118a7c319452ab5ea) | 25,744,460 | 68,355 |
+| `mint` | [`0x1384bd7c…`](https://etherscan.io/tx/0x1384bd7c666281756574351b2ff7fc0fc81c0b77c6a00a0a26b37036dd27d985) | 25,744,465 | 423,240 |
+
+Result: tokenId **1349240**, USDC/WETH 0.05%, ticks **200260–200740**, liquidity
+**646,075,971,053** — single-sided WETH, placed below the price, so it needed
+only the one token the wallet held.
+
+**Closing it** — `/exit 1`:
+
+| Step | Transaction | Block | Gas |
+|---|---|---|---|
+| `decreaseLiquidity` | [`0xadb42281…`](https://etherscan.io/tx/0xadb4228146c12011e748fa60da4892e5dafb0bc6087becc568a6c7d37c121062) | 25,745,131 | 167,361 |
+| `collect` | [`0xc64ede69…`](https://etherscan.io/tx/0xc64ede695353462485f5fa688a89ead8fb21612af77cdca65717faa59bc1b094) | 25,745,134 | 90,117 |
+| `burn` | [`0x80a7d0cf…`](https://etherscan.io/tx/0x80a7d0cf63026141b3463696ac472e213cd93d6d5496bc68a89cb5d41f37b051) | 25,745,135 | 100,065 |
+
+Recovered **0.000349999999999999 WETH** — the deposit back, one wei short from
+AMM rounding. That single wei is not a curiosity: `toBaseUnits` is exact, so
+re-running `/lp … 0 0.00035` afterwards asks for 350000000000000 wei against a
+balance of 349999999999999 and reverts with `STF`.
+
+All six rows above are exactly what `/history` prints, because they come from
+the same KeeperHub record.
+
+`singleSidedTicks` carries a regression test pinned to that exact range, and
+`positionAmounts` carries one pinned to the same position's value.
+
+Two things the exit confirmed that only a live run could:
+
+- **KeeperHub encodes `DecreaseLiquidityParams` and `CollectParams` from an
+  object**, exactly as it does `MintParams`. The receipts show
+  `decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))` and
+  `collect((uint256,address,uint128,uint128))` resolved correctly.
+- **`burn` really does need the position cleared first.** It simulated as
+  `Error(Not cleared)` right up until the decrease and collect ahead of it had
+  actually executed, which is why the three steps are ordered rather than
+  independent — and why the reply explains that revert instead of hiding it.
 
 ## Known limits
 

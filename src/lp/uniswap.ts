@@ -10,6 +10,17 @@ export interface TokenRef {
   symbol: string;
 }
 
+// Reverse of the TOKENS alias table: an address back to its known symbol and
+// decimals. Used when a position read hands back raw addresses — a hit here
+// saves two on-chain reads per token (decimals + symbol) on the common pairs.
+export function knownToken(address: string): TokenRef | undefined {
+  const a = address.trim().toLowerCase();
+  for (const [symbol, t] of Object.entries(TOKENS)) {
+    if (t.address === a) return { address: a, decimals: t.decimals, symbol };
+  }
+  return undefined;
+}
+
 // Resolve `USDC` or a raw 0x address. An address always wins over an alias, so
 // a pasted address is never silently reinterpreted as a known symbol.
 export function resolveToken(input: string): TokenRef | undefined {
@@ -138,6 +149,70 @@ export function applySlippage(amount: bigint, pct: number): bigint {
   // would lose precision on large balances.
   const bps = BigInt(Math.round((100 - pct) * 100));
   return (amount * bps) / 10000n;
+}
+
+// collect() takes uint128 maxima. Passing the type's maximum is the idiomatic
+// "sweep everything owed" — principal freed by decreaseLiquidity plus every fee
+// accrued since the position was opened.
+export const MAX_UINT128 = (1n << 128n) - 1n;
+
+const Q96 = 1n << 96n;
+
+// sqrt(1.0001^tick) * 2^96.
+//
+// Approximated in floating point rather than porting Uniswap's TickMath, whose
+// exactness exists to make the AMM's own arithmetic reproducible. The only
+// consumer here is positionAmounts, whose output feeds an amountMin that then
+// has a whole slippage percent subtracted from it — a relative error of ~1e-15
+// is fifteen orders of magnitude below that tolerance and cannot change the
+// bound. Never use this to settle a balance.
+export function sqrtRatioAtTickX96(tick: number): bigint {
+  if (tick < MIN_TICK || tick > MAX_TICK) throw new Error(`tick out of range: ${tick}`);
+  const ratio = Math.pow(1.0001, tick / 2) * 2 ** 96;
+  if (!Number.isFinite(ratio) || ratio <= 0) throw new Error(`tick out of range: ${tick}`);
+  return BigInt(Math.floor(ratio));
+}
+
+// How much of each token a given liquidity is worth right now.
+//
+// v3 splits a position by where the price sits relative to the range, so all
+// three regimes fall out of ONE formula once the current price is clamped into
+// [tickLower, tickUpper]:
+//   price at or below the range -> clamps to sqrtA -> all token0
+//   price at or above the range -> clamps to sqrtB -> all token1
+//   price inside                -> a mix of both
+// Clamping also guarantees sqrtP > 0, so the token0 division cannot be by zero.
+export function positionAmounts(
+  liquidity: bigint,
+  tickLower: number,
+  tickUpper: number,
+  sqrtPriceX96: bigint
+): { amount0: bigint; amount1: bigint } {
+  if (tickLower >= tickUpper) throw new Error(`empty range: ${tickLower} >= ${tickUpper}`);
+  if (liquidity <= 0n) return { amount0: 0n, amount1: 0n };
+  const sqrtA = sqrtRatioAtTickX96(tickLower);
+  const sqrtB = sqrtRatioAtTickX96(tickUpper);
+  const sqrtP = sqrtPriceX96 < sqrtA ? sqrtA : sqrtPriceX96 > sqrtB ? sqrtB : sqrtPriceX96;
+  const amount0 = sqrtP >= sqrtB ? 0n : (liquidity * (sqrtB - sqrtP) * Q96) / (sqrtP * sqrtB);
+  const amount1 = sqrtP <= sqrtA ? 0n : (liquidity * (sqrtP - sqrtA)) / Q96;
+  return { amount0, amount1 };
+}
+
+// Both of these are tuple arguments, so they are objects for the same reason
+// buildMintParams is — a nested array double-nests and fails to encode.
+export interface DecreaseLiquidityParams {
+  tokenId: string;
+  liquidity: string;
+  amount0Min: string;
+  amount1Min: string;
+  deadline: string;
+}
+
+export interface CollectParams {
+  tokenId: string;
+  recipient: string;
+  amount0Max: string;
+  amount1Max: string;
 }
 
 export interface MintParams {
@@ -297,6 +372,39 @@ export const NPM_ABI = JSON.stringify([
       { name: 'feeGrowthInside1LastX128', type: 'uint256' },
       { name: 'tokensOwed0', type: 'uint128' }, { name: 'tokensOwed1', type: 'uint128' },
     ],
+  },
+  // The exit path. decreaseLiquidity converts liquidity into "owed" balances,
+  // collect transfers them out, burn retires the NFT — and burn reverts unless
+  // liquidity AND both owed balances are already zero, which is why the order
+  // is fixed rather than a matter of taste.
+  {
+    type: 'function', name: 'decreaseLiquidity', stateMutability: 'payable',
+    inputs: [{
+      name: 'params', type: 'tuple', components: [
+        { name: 'tokenId', type: 'uint256' },
+        { name: 'liquidity', type: 'uint128' },
+        { name: 'amount0Min', type: 'uint256' },
+        { name: 'amount1Min', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+      ],
+    }],
+    outputs: [{ name: 'amount0', type: 'uint256' }, { name: 'amount1', type: 'uint256' }],
+  },
+  {
+    type: 'function', name: 'collect', stateMutability: 'payable',
+    inputs: [{
+      name: 'params', type: 'tuple', components: [
+        { name: 'tokenId', type: 'uint256' },
+        { name: 'recipient', type: 'address' },
+        { name: 'amount0Max', type: 'uint128' },
+        { name: 'amount1Max', type: 'uint128' },
+      ],
+    }],
+    outputs: [{ name: 'amount0', type: 'uint256' }, { name: 'amount1', type: 'uint256' }],
+  },
+  {
+    type: 'function', name: 'burn', stateMutability: 'payable',
+    inputs: [{ name: 'tokenId', type: 'uint256' }], outputs: [],
   },
 ]);
 

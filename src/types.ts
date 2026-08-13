@@ -3,6 +3,13 @@ export type RiskLevel = 'clean' | 'caution' | 'high' | 'unknown';
 export interface AuditResult {
   verified: boolean; // explorer source present → drives the ✅ / ⚠️ badge
   risk: RiskLevel; // heuristic source-scan result → drives the risk light
+  // Which rules the source scan actually hit, e.g. ['has-mint','upgradeable'].
+  // The boards render only the risk light — one glyph per row is all a board
+  // has space for — but a caller about to commit funds to a token wants to know
+  // WHY it is red, so the detail is carried rather than discarded.
+  // Optional: absent on an unverified token (no source to scan) and on results
+  // cached by an earlier build.
+  flags?: string[];
 }
 
 // One row of a Top Movers board. Shared by the v3 and v4 workers so a single

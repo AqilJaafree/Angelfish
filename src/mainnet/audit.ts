@@ -141,7 +141,7 @@ export async function resolveAudit(
       if (!body.is_verified) return remember({ verified: false, risk: 'unknown' });
       const { level, flags } = scanSource(combineSources(body));
       logger.debug({ token, flags, level }, 'movers: audit scan');
-      return remember({ verified: true, risk: level });
+      return remember({ verified: true, risk: level, flags });
     } catch (err) {
       logger.warn({ err, token }, 'movers: audit lookup failed');
       return undefined;

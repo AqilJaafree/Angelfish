@@ -2,9 +2,10 @@ import { logger } from '../logger';
 import { POSITION_MANAGER, V3_FACTORY, WALLET_ADDRESS, DEFAULT_SLIPPAGE_PCT } from './config';
 import * as kh from './keeperhub';
 import {
-  ERC20_ABI, GET_POOL_ABI, MINT_ABI, SLOT0_ABI, TokenRef, ZERO_ADDRESS,
-  buildMintParams, fromBaseUnits, priceFromSqrt, rangeTicks, singleSidedTicks,
-  sortTokens, toBaseUnits,
+  CollectParams, DecreaseLiquidityParams, ERC20_ABI, GET_POOL_ABI, MAX_UINT128, MINT_ABI,
+  NPM_ABI, SLOT0_ABI, TokenRef, ZERO_ADDRESS,
+  applySlippage, buildMintParams, fromBaseUnits, knownToken, positionAmounts, priceFromSqrt,
+  rangeTicks, singleSidedTicks, sortTokens, toBaseUnits,
 } from './uniswap';
 
 export interface PlanStep {
@@ -144,6 +145,137 @@ export async function quoteLp(input: {
     `price    ${fmt(price)} ${token1.symbol} per ${token0.symbol}\n` +
     `${rangeLine}\n` +
     `ticks    ${tickLower} … ${tickUpper} (spacing ${spacing})\n` +
+    `slippage ${slippagePct}% · deadline 20 min`;
+
+  return { summary, steps };
+}
+
+// Everything /exit needs to describe a position before touching it.
+export interface PositionSnapshot {
+  tokenId: string;
+  token0: TokenRef;
+  token1: TokenRef;
+  fee: number;
+  tickLower: number;
+  tickUpper: number;
+  liquidity: bigint;
+  owed0: bigint;
+  owed1: bigint;
+}
+
+// Read a position and resolve both of its tokens. `knownToken` short-circuits
+// the alias table so a USDC/WETH position costs no decimals()/symbol() reads.
+export async function readPosition(tokenId: string): Promise<PositionSnapshot> {
+  const p = await kh.readFields(POSITION_MANAGER, 'positions', [tokenId], NPM_ABI);
+  const asRef = (address: string): TokenRef => {
+    const a = address.toLowerCase();
+    return knownToken(a) ?? { address: a, decimals: -1, symbol: `${a.slice(0, 6)}…${a.slice(-4)}` };
+  };
+  const [token0, token1] = await Promise.all([hydrate(asRef(p.token0)), hydrate(asRef(p.token1))]);
+  return {
+    tokenId,
+    token0,
+    token1,
+    fee: Number(p.fee),
+    tickLower: Number(p.tickLower),
+    tickUpper: Number(p.tickUpper),
+    liquidity: BigInt(p.liquidity ?? '0'),
+    owed0: BigInt(p.tokensOwed0 ?? '0'),
+    owed1: BigInt(p.tokensOwed1 ?? '0'),
+  };
+}
+
+// Build the withdraw plan: decreaseLiquidity -> collect -> (burn on a full exit).
+//
+// amountMin is derived from the position's real value at the current pool price
+// rather than left at 0. A zero floor would let the pool price be pushed before
+// inclusion so the exit settles into whichever side the attacker prefers — the
+// mirror image of the slippage guard the mint path already carries.
+export async function quoteExit(input: {
+  tokenId: string;
+  pct?: number;
+  slippagePct?: number;
+  now?: number;
+}): Promise<LpPlan> {
+  if (!WALLET_ADDRESS) throw new Error('LP_WALLET_ADDRESS is not set');
+  const pct = input.pct ?? 100;
+  if (!(pct > 0) || pct > 100) throw new Error(`exit percent must be above 0 and at most 100, got ${pct}`);
+  const slippagePct = input.slippagePct ?? DEFAULT_SLIPPAGE_PCT;
+
+  const pos = await readPosition(input.tokenId);
+  if (pos.liquidity === 0n && pos.owed0 === 0n && pos.owed1 === 0n) {
+    throw new Error(`position #${input.tokenId} is already empty — nothing to withdraw`);
+  }
+
+  // Integer maths on the share, for the reason toBaseUnits avoids floats: this
+  // is an amount, and a float multiply on a uint128 loses its low bits.
+  const liquidityOut =
+    pct >= 100 ? pos.liquidity : (pos.liquidity * BigInt(Math.round(pct * 100))) / 10_000n;
+  if (pos.liquidity > 0n && liquidityOut === 0n) {
+    throw new Error(`${pct}% of this position rounds to zero liquidity — use a larger percent`);
+  }
+
+  const poolRes = await kh.readFields(
+    V3_FACTORY, 'getPool', [pos.token0.address, pos.token1.address, pos.fee], GET_POOL_ABI
+  );
+  const slot0 = await kh.readFields(poolRes.pool, 'slot0', [], SLOT0_ABI);
+  const sqrtPriceX96 = BigInt(slot0.sqrtPriceX96);
+  const expected = positionAmounts(liquidityOut, pos.tickLower, pos.tickUpper, sqrtPriceX96);
+  const amount0Min = applySlippage(expected.amount0, slippagePct);
+  const amount1Min = applySlippage(expected.amount1, slippagePct);
+
+  const now = input.now ?? Date.now();
+  const deadlineSec = Math.floor(now / 1000) + 20 * 60;
+  const fullExit = pct >= 100;
+  const steps: PlanStep[] = [];
+
+  if (liquidityOut > 0n) {
+    const params: DecreaseLiquidityParams = {
+      tokenId: pos.tokenId,
+      liquidity: liquidityOut.toString(),
+      amount0Min: amount0Min.toString(),
+      amount1Min: amount1Min.toString(),
+      deadline: String(deadlineSec),
+    };
+    steps.push({
+      label: `withdraw ${pct}% of #${pos.tokenId}`,
+      contract: POSITION_MANAGER,
+      fn: 'decreaseLiquidity',
+      args: JSON.stringify([params]), // tuple as an OBJECT — see buildMintParams
+      abi: NPM_ABI,
+    });
+  }
+  const collect: CollectParams = {
+    tokenId: pos.tokenId,
+    recipient: WALLET_ADDRESS,
+    // Sweep everything owed: the principal just freed plus all accrued fees.
+    amount0Max: MAX_UINT128.toString(),
+    amount1Max: MAX_UINT128.toString(),
+  };
+  steps.push({
+    label: `collect ${pos.token0.symbol} + ${pos.token1.symbol} to wallet`,
+    contract: POSITION_MANAGER,
+    fn: 'collect',
+    args: JSON.stringify([collect]),
+    abi: NPM_ABI,
+  });
+  if (fullExit) {
+    steps.push({
+      label: `burn position NFT #${pos.tokenId}`,
+      contract: POSITION_MANAGER,
+      fn: 'burn',
+      args: JSON.stringify([pos.tokenId]),
+      abi: NPM_ABI,
+    });
+  }
+
+  const amt = (v: bigint, t: TokenRef): string => `${fromBaseUnits(v, t.decimals)} ${t.symbol}`;
+  const summary =
+    `<b>exit #${pos.tokenId}</b> · ${pos.token0.symbol}/${pos.token1.symbol} · fee ${pos.fee / 10000}%\n` +
+    `withdraw ${fullExit ? '<b>100%</b> (full exit)' : `<b>${pct}%</b> (partial)`}\n` +
+    `expect   ~${amt(expected.amount0, pos.token0)} + ~${amt(expected.amount1, pos.token1)} <i>+ fees</i>\n` +
+    `min      ${amt(amount0Min, pos.token0)} / ${amt(amount1Min, pos.token1)}\n` +
+    `ticks    ${pos.tickLower} … ${pos.tickUpper}\n` +
     `slippage ${slippagePct}% · deadline 20 min`;
 
   return { summary, steps };

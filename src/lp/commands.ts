@@ -4,7 +4,9 @@ import {
 } from './config';
 import * as kh from './keeperhub';
 import * as pending from './pending';
-import { execute, quoteLp, resolvePool, simulate, StepOutcome } from './plan';
+import { AuditEntry, auditToken, renderAuditLine, renderAuditReport, tokensNeedingAudit } from './audit';
+import { DEFAULT_TRAIL_LIMIT, fetchTrail, renderTrail } from './trail';
+import { execute, quoteExit, quoteLp, resolvePool, simulate, StepOutcome } from './plan';
 import { ERC20_ABI, NPM_ABI, WETH_DEPOSIT_ABI, fromBaseUnits, priceFromSqrt, resolveToken, toBaseUnits } from './uniswap';
 
 export interface ParsedCommand {
@@ -29,6 +31,9 @@ const HELP = [
   '<code>/wrap  &lt;amount-eth&gt;</code>  wrap ETH into WETH',
   '<code>/confirm &lt;code&gt;</code>  execute the quoted plan',
   '<code>/positions</code>  open positions',
+  '<code>/exit  [n] [percent]</code>  withdraw — run bare to pick from a list',
+  '<code>/audit &lt;token&gt;</code>  contract verification and source scan',
+  '<code>/history [n]</code>  what this wallet has signed (from KeeperHub)',
   '<code>/cancel</code>  drop pending quotes',
   '<code>/wallet</code>  address and balances',
   '<code>/status</code>  configuration check',
@@ -36,9 +41,10 @@ const HELP = [
   `fee tiers: ${Object.keys(TICK_SPACING).join(', ')}  ·  symbols: ${Object.keys(TOKENS).join(', ')}`,
   'Addresses are accepted anywhere a symbol is.',
   '',
-  '<i>Every /lp is simulated first. Nothing is broadcast until /confirm.</i>',
+  '<i>Every /lp and /exit is simulated first. Nothing is broadcast until /confirm.</i>',
   '<i>Pass 0 for one amount to open a single-sided position — the range is placed',
   'entirely on the side that needs only the token you hold.</i>',
+  '<i>To close one: /exit lists your positions, then /exit 1 closes the first.</i>',
 ].join('\n');
 
 function outcomeLines(rows: StepOutcome[]): string {
@@ -108,6 +114,16 @@ async function cmdLp(args: string[]): Promise<string> {
   const rangePct = args[5] ? Number(args[5].replace('%', '')) : DEFAULT_RANGE_PCT;
   if (!Number.isFinite(rangePct) || rangePct <= 0 || rangePct >= 100) return `invalid range: ${args[5]}`;
 
+  // Audit before quoting. A token reached by raw address has had nothing
+  // checked about it, and the verdict belongs in front of the operator BEFORE
+  // they read a confirm code — not appended after it, where it reads as a
+  // footnote to a decision already made.
+  const audits: AuditEntry[] = [];
+  for (const address of tokensNeedingAudit([a.address, b.address])) {
+    const symbol = address === a.address.toLowerCase() ? a.symbol : b.symbol;
+    audits.push(await auditToken(address, symbol));
+  }
+
   const plan = await quoteLp({ tokenA: a, tokenB: b, fee, amountA: args[3], amountB: args[4], rangePct });
   const sim = await simulate(plan.steps);
   const allOk = sim.every((s) => s.ok);
@@ -121,11 +137,35 @@ async function cmdLp(args: string[]): Promise<string> {
     notes.push('<i>The mint simulates against current allowances, so it can report STF while an approval is still pending in this same plan. Confirm applies them in order.</i>');
   }
   return (
+    renderAuditBlock(audits) +
     `${plan.summary}\n\n<b>simulation</b>\n${outcomeLines(sim)}\n` +
     (notes.length ? `\n${notes.join('\n')}\n` : '') +
     `\n${allOk ? '✅ all steps simulate clean' : '⚠️ some steps would revert'}\n` +
     `confirm with <code>/confirm ${stored.code}</code> — expires in 5 min`
   );
+}
+
+// The audit header on a quote. Empty when both sides are curated majors, so a
+// routine USDC/WETH quote is not padded with a paragraph saying nothing.
+export function renderAuditBlock(audits: AuditEntry[]): string {
+  if (!audits.length) return '';
+  const lines = ['<b>token audit</b>', ...audits.map(renderAuditLine)];
+  // Lead with the worst case. An unverified contract and a high-risk one are
+  // different problems and get different sentences — collapsing them into one
+  // generic "be careful" would lose the distinction the two badges exist for.
+  const unverified = audits.filter((e) => e.result && !e.result.verified);
+  const high = audits.filter((e) => e.result?.verified && e.result.risk === 'high');
+  const failed = audits.filter((e) => !e.result);
+  if (unverified.length) {
+    lines.push(`⚠️ <b>${unverified.map((e) => e.symbol).join(', ')}</b> has no published source — nobody can read what it does.`);
+  }
+  if (high.length) {
+    lines.push(`🔴 <b>${high.map((e) => e.symbol).join(', ')}</b> holds rug-enabling powers (flags above).`);
+  }
+  if (failed.length) {
+    lines.push(`❔ audit could not be reached for <b>${failed.map((e) => e.symbol).join(', ')}</b> — absence of a badge is not a pass.`);
+  }
+  return lines.join('\n') + '\n\n';
 }
 
 // ETH is not an ERC20, so a wallet holding only ETH cannot LP until it is
@@ -149,20 +189,146 @@ async function cmdWrap(args: string[]): Promise<string> {
   return `wrap <b>${amount} ETH</b> → WETH\ngas ~${sim.gasEstimate ?? '?'}\n\nconfirm with <code>/confirm ${stored.code}</code>`;
 }
 
+const MAX_LISTED_POSITIONS = 10;
+
+interface PositionRow {
+  slot: number; // 1-based, as shown to the user
+  tokenId: string;
+  fields: Record<string, string>;
+}
+
+// The list every position-facing command works from. Slot numbers are assigned
+// here and nowhere else, so `/exit 2` always means the second row of the list
+// the user is looking at.
+async function fetchPositions(): Promise<PositionRow[]> {
+  const n = Number(await kh.readScalar(POSITION_MANAGER, 'balanceOf', [WALLET_ADDRESS], NPM_ABI));
+  const out: PositionRow[] = [];
+  for (let i = 0; i < Math.min(n, MAX_LISTED_POSITIONS); i++) {
+    const tokenId = await kh.readScalar(POSITION_MANAGER, 'tokenOfOwnerByIndex', [WALLET_ADDRESS, String(i)], NPM_ABI);
+    out.push({ slot: i + 1, tokenId, fields: await kh.readFields(POSITION_MANAGER, 'positions', [tokenId], NPM_ABI) });
+  }
+  return out;
+}
+
+function renderPosition(p: PositionRow): string {
+  const f = p.fields;
+  const empty = BigInt(f.liquidity ?? '0') === 0n;
+  return (
+    `<b>${p.slot})</b> #${p.tokenId} · fee ${Number(f.fee) / 10000}% · ticks ${f.tickLower}…${f.tickUpper}\n` +
+    `     liquidity ${f.liquidity}${empty ? ' <i>(empty)</i>' : ''} · owed ${f.tokensOwed0}/${f.tokensOwed1}\n` +
+    `     exit with <code>/exit ${p.slot}</code>`
+  );
+}
+
+export type ExitTarget =
+  | { kind: 'list' }
+  | { kind: 'slot'; slot: number }
+  | { kind: 'tokenId'; tokenId: string }
+  | { kind: 'error'; message: string };
+
+// Resolve what the user meant by the first argument to /exit.
+//
+// The point of the slot indirection is that nobody should have to retype a
+// seven-digit tokenId off a phone screen. So a small number is a POSITION SLOT,
+// never a token id — and a number too large to be a slot is refused with the
+// `#` form spelled out rather than silently reinterpreted, because guessing
+// wrong would target a completely unrelated position.
+export function parseExitTarget(arg: string | undefined, count: number): ExitTarget {
+  const raw = (arg ?? '').trim();
+  if (!raw) return { kind: 'list' };
+  if (raw.startsWith('#')) {
+    const id = raw.slice(1);
+    if (!/^\d+$/.test(id)) return { kind: 'error', message: `not a token id: <code>${raw}</code>` };
+    return { kind: 'tokenId', tokenId: id };
+  }
+  if (!/^\d+$/.test(raw)) {
+    return { kind: 'error', message: 'usage: <code>/exit &lt;n&gt; [percent]</code> — run <code>/exit</code> to list positions' };
+  }
+  if (count === 0) return { kind: 'error', message: 'no open positions to exit.' };
+  const n = Number(raw);
+  if (n >= 1 && n <= count) return { kind: 'slot', slot: n };
+  return {
+    kind: 'error',
+    message:
+      `you have ${count} position${count === 1 ? '' : 's'} — pick 1–${count}.\n` +
+      `to target token id ${raw} directly, use <code>/exit #${raw}</code>`,
+  };
+}
+
+// Accepts `50` or `50%`. Absent means a full exit.
+export function parseExitPct(arg: string | undefined): number | { error: string } {
+  if (arg === undefined || arg.trim() === '') return 100;
+  const pct = Number(arg.trim().replace('%', ''));
+  if (!Number.isFinite(pct) || pct <= 0 || pct > 100) return { error: `invalid percent: ${arg}` };
+  return pct;
+}
+
 async function cmdPositions(): Promise<string> {
   if (!WALLET_ADDRESS) return '❌ LP_WALLET_ADDRESS is not set.';
-  const n = Number(await kh.readScalar(POSITION_MANAGER, 'balanceOf', [WALLET_ADDRESS], NPM_ABI));
-  if (!n) return 'no open positions.';
-  const out: string[] = [`<b>${n} position${n === 1 ? '' : 's'}</b>`, ''];
-  for (let i = 0; i < Math.min(n, 10); i++) {
-    const id = await kh.readScalar(POSITION_MANAGER, 'tokenOfOwnerByIndex', [WALLET_ADDRESS, String(i)], NPM_ABI);
-    const p = await kh.readFields(POSITION_MANAGER, 'positions', [id], NPM_ABI);
-    out.push(
-      `#${id} · fee ${Number(p.fee) / 10000}% · ticks ${p.tickLower}…${p.tickUpper}\n` +
-      `     liquidity ${p.liquidity} · owed ${p.tokensOwed0}/${p.tokensOwed1}`
-    );
+  const positions = await fetchPositions();
+  if (!positions.length) return 'no open positions.';
+  return [
+    `<b>${positions.length} position${positions.length === 1 ? '' : 's'}</b>`,
+    '',
+    ...positions.map(renderPosition),
+  ].join('\n');
+}
+
+async function cmdExit(args: string[]): Promise<string> {
+  if (!WALLET_ADDRESS) return '❌ LP_WALLET_ADDRESS is not set.';
+  const positions = await fetchPositions();
+  const target = parseExitTarget(args[0], positions.length);
+  if (target.kind === 'error') return target.message;
+  if (target.kind === 'list') {
+    if (!positions.length) return 'no open positions to exit.';
+    return [
+      '<b>which position?</b>',
+      '',
+      ...positions.map(renderPosition),
+      '',
+      '<code>/exit &lt;n&gt;</code> closes it fully · <code>/exit &lt;n&gt; 50</code> takes out half',
+    ].join('\n');
   }
-  return out.join('\n');
+  const pct = parseExitPct(args[1]);
+  if (typeof pct !== 'number') return pct.error;
+  const tokenId = target.kind === 'slot' ? positions[target.slot - 1].tokenId : target.tokenId;
+
+  const plan = await quoteExit({ tokenId, pct });
+  const sim = await simulate(plan.steps);
+  const allOk = sim.every((s) => s.ok);
+  const stored = pending.put({ summary: plan.summary, steps: plan.steps });
+
+  // Each step simulates against CURRENT state, so collect and burn legitimately
+  // report a revert while the decrease they depend on has not been applied.
+  // Saying so keeps that artefact distinguishable from a real failure — the same
+  // reasoning as the approve-then-mint note in /lp.
+  const artefact = !allOk && sim[0].ok && sim.slice(1).some((s) => !s.ok);
+  return (
+    `${plan.summary}\n\n<b>simulation</b>\n${outcomeLines(sim)}\n` +
+    (artefact
+      ? '\n<i>collect and burn simulate against the position as it stands now, so they can report a revert until the withdraw ahead of them is applied. Confirm runs the steps in order.</i>\n'
+      : '') +
+    `\n${allOk ? '✅ all steps simulate clean' : '⚠️ some steps would revert'}\n` +
+    `confirm with <code>/confirm ${stored.code}</code> — expires in 5 min`
+  );
+}
+
+// Audit any token on demand, including the curated majors that /lp skips —
+// an explicit request is a different thing from an automatic check, and the
+// report carries the calibration caveat with it.
+async function cmdAudit(args: string[]): Promise<string> {
+  if (!args[0]) {
+    return 'usage: <code>/audit &lt;token&gt;</code> — symbol or address\nfor what this wallet has signed, use <code>/history</code>';
+  }
+  const token = resolveToken(args[0]);
+  if (!token) return `unknown token: ${args[0]}`;
+  return renderAuditReport(await auditToken(token.address, token.symbol));
+}
+
+async function cmdHistory(args: string[]): Promise<string> {
+  const limit = args[0] ? Number(args[0].replace(/\D/g, '')) : DEFAULT_TRAIL_LIMIT;
+  if (!Number.isFinite(limit) || limit <= 0) return `invalid count: ${args[0]}`;
+  return renderTrail(await fetchTrail(limit));
 }
 
 async function cmdConfirm(args: string[]): Promise<string> {
@@ -193,6 +359,14 @@ export async function handle(cmd: ParsedCommand): Promise<string> {
       return cmdWrap(cmd.args);
     case 'positions':
       return cmdPositions();
+    case 'exit':
+    case 'withdraw':
+      return cmdExit(cmd.args);
+    case 'audit':
+      return cmdAudit(cmd.args);
+    case 'history':
+    case 'trail':
+      return cmdHistory(cmd.args);
     case 'confirm':
       return cmdConfirm(cmd.args);
     case 'cancel': {
