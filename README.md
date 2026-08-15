@@ -769,8 +769,30 @@ the bot targeted when they ran, and they are left here unaltered as the provenan
 they are. What they prove carries over unchanged — the KeeperHub tuple encoding, the
 `decreaseLiquidity → collect → burn` ordering, the single-sided tick placement, and
 the wei-exactness trap below are all protocol mechanics, and PancakeSwap v3 is Uniswap
-v3's fee ladder bolted onto the same contracts. What they do **not** prove is the BNB
-Chain path end to end; that awaits a funded wallet on BSC.
+v3's fee ladder bolted onto the same contracts.
+
+#### The BNB Chain path, proven to simulation
+
+The BSC route has been driven end to end short of broadcasting, by running the bot's
+own `quoteLp` and `simulate` against a live chain — `/lp USDT WBNB 500 0 0.01`:
+
+| Stage | Result |
+|---|---|
+| `resolvePool(USDT, WBNB, 500)` | pool `0x36696169…`, token0 **USDT**, tick **-64123** |
+| single-sided detection | WBNB-only → range placed **below** price, ticks `-64710 … -64230`, spacing 10 |
+| `approve` WBNB → position manager | ✅ **simulated OK, gas ~46,422** |
+| `mint` | ⛔ `would revert: Error(STF)` |
+
+`STF` is `SafeTransferFrom` failing because **the wallet holds no WBNB** — the same
+signature the Ethereum path produced before it was funded. Everything upstream of the
+funds is therefore confirmed on BSC: the factory lookup, the `slot0` read and its
+decimal handling, the tick maths against a real pool, and — the part that could not be
+assumed — **KeeperHub encoding PancakeSwap's `mint` tuple on chain 56**. The approve
+simulating successfully is what separates "the calldata is right" from "the calldata
+is merely well-formed".
+
+What remains unproven is only what money can prove: a real broadcast. Fund the wallet
+with WBNB plus a little BNB and the same command executes.
 
 **Opening the position** — `/wrap 0.00035` then `/lp USDC WETH 500 0 0.00035`:
 
@@ -834,10 +856,11 @@ Two things the exit confirmed that only a live run could:
   stages; the audit is ~13s of it. An overrun is absorbed by the `cycleRunning` guard
   and logged, but it costs a skipped window, so raise `MOVERS_MAX_LOOKBACK_BLOCKS` if
   you see the downtime clamp firing.
-- **The LP bot's BNB Chain path has not executed live.** Every address is verified
-  on-chain and the fee ladder is corrected, but the round trip in
+- **The LP bot has not broadcast a BNB Chain transaction.** The path is proven to
+  simulation — the `approve` simulates OK and the `mint` reverts only with `STF`
+  against an empty wallet — but the round trip in
   [Proven live](#proven-live--on-ethereum-before-the-bnb-chain-port) ran on Ethereum
-  against Uniswap v3. The BSC path awaits a funded wallet.
+  against Uniswap v3. Funding the wallet is the only step left.
 - **The v3 sweep depends on one of two endpoints.** Only `bsc.blockrazor.xyz` and
   `1rpc.io/bnb` answer a topic-only `eth_getLogs` at all. If both are down the v3
   board stops; the Infinity board, which filters on an address, is unaffected.
