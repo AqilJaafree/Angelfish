@@ -107,11 +107,16 @@ publicnode serves JSON-RPC batches — 300 calls in 725ms against ~57s sequentia
 pool resolution became phased and batched: one batch for all `token0`/`token1` pairs,
 a second for `fee()` on the survivors, a third for the factory check on those.
 
-Measured end to end: **cold cycle 270s → 43s.**
+Measured end to end: **cold cycle 270s → 43s** (audit disabled).
 
-The market-cap walk stays sequential on purpose. Its laziness is what bounds lookups
-to 25 per cycle and lets it stop as soon as both groups are full; batching it would
-mean pricing every token to discover which ones were needed.
+The market-cap walk stays sequential **across tokens** on purpose — its laziness is
+what bounds lookups to 25 per cycle and lets it stop as soon as both groups are full,
+and batching that away would mean pricing every token to discover which ones were
+needed. But each individual lookup was spending two round trips on `totalSupply()` and
+`decimals()`, and batching *that pair* changes neither the ordering nor the early
+exit: **38s → 13s** on the v3 board, **16s → 9s** on Infinity.
+
+With the audit enabled, cold cycles now measure **58–86s** against a 120s poll.
 
 A per-item batch error yields `null` for that item rather than throwing, which keeps
 the existing caching rule intact: `null` is transient and never cached, `0x` is a

@@ -245,7 +245,7 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
           row.token,
           state.supplies,
           state.suppliesCheckedAt,
-          rpc.call
+          rpc.callMany
         );
         if (!tm) return undefined;
         return computeFdvUsd({

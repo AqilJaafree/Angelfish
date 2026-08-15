@@ -2,6 +2,7 @@ import { logger } from '../logger';
 import { hasWords, wordAt } from './decode';
 import { sqrtPriceToSeriesValue } from './price';
 import { SEL_TOTAL_SUPPLY, SEL_DECIMALS } from './config';
+import { ManyCaller } from './rpc';
 
 // decimals() is immutable, but totalSupply() is NOT — a mintable token's supply
 // changes, and a mint is exactly the event that should move its market cap. So the
@@ -73,11 +74,19 @@ export function computeFdvUsd(i: FdvInputs): number | undefined {
 
 // Read a token's supply and decimals, cache-first. Transient failures return
 // undefined WITHOUT caching so the next cycle retries.
+//
+// The two reads go out as ONE batch rather than two awaits. That halves the round
+// trips of the market-cap walk, which is the single most expensive stage of a cycle:
+// it is capped at MCAP_MAX_LOOKUPS (25) and is deliberately sequential across tokens
+// — its laziness is what lets it stop as soon as both boards are full — so its cost
+// is round-trips × 2, and on BSC that measured 38s of an 89s cycle. Batching the pair
+// leaves the walk's ordering and early-exit exactly as they were and simply makes
+// each step cost one request instead of two.
 export async function resolveTokenMeta(
   token: string,
   cache: Record<string, TokenMeta>,
   checkedAt: Record<string, number>,
-  call: Caller,
+  callMany: ManyCaller,
   now: number = Date.now()
 ): Promise<{ supply: bigint; decimals: number } | undefined> {
   const hit = cache[token];
@@ -85,11 +94,14 @@ export async function resolveTokenMeta(
     return { supply: BigInt(hit.supply), decimals: hit.decimals };
   }
   try {
-    const supplyRaw = await call(token, SEL_TOTAL_SUPPLY);
-    const decRaw = await call(token, SEL_DECIMALS);
+    const [supplyRaw, decRaw] = await callMany([
+      { to: token, data: SEL_TOTAL_SUPPLY },
+      { to: token, data: SEL_DECIMALS },
+    ]);
     // wordAt returns 0n for a short/empty response, which for decimals is
     // indistinguishable from a real 0-decimal token — so reject the empty case
-    // outright rather than silently pricing the token 1e18x wrong.
+    // outright rather than silently pricing the token 1e18x wrong. A `null` from the
+    // batch is a per-item failure and is rejected by the same check.
     if (!hasWords(supplyRaw, 1) || !hasWords(decRaw, 1)) return undefined;
     const supply = wordAt(supplyRaw, 0);
     const decimals = Number(wordAt(decRaw, 0));

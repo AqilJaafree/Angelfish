@@ -108,7 +108,14 @@ all.
 
 Pool resolution is therefore phased and batched: one JSON-RPC batch for every
 `token0`/`token1` pair, a second for `fee()` on the survivors, a third for the factory
-check on those. Measured end to end, a **cold cycle went from 270s to 43s**.
+check on those. That alone took a cold cycle from **270s to 43s** (audit disabled).
+
+The market-cap walk got the same treatment for a different reason. It is capped at
+`MOVERS_MCAP_MAX_LOOKUPS` and is deliberately **sequential across tokens** — its
+laziness is what lets it stop the moment both boards are full — so its cost is
+round-trips, and each lookup was spending two of them on `totalSupply()` and
+`decimals()`. Batching that pair leaves the ordering and early exit untouched and
+halved the stage: **38s → 13s** on the v3 board, **16s → 9s** on Infinity.
 
 A per-item error in a batch yields `null` for that item rather than throwing, so one
 bad address can't discard a batch of good answers — and `null` (transient, never
@@ -820,12 +827,13 @@ Two things the exit confirmed that only a live run could:
 - **Verification coverage is ~80% without a key.** Sourcify answered for 48 of 60
   sampled board tokens; the rest render `⚠️⬜`. Setting the free
   `BSC_EXPLORER_API_KEY` adds Etherscan V2 as a second source to cover the gap.
-- **Cycle time is marginal against the poll interval.** With the audit enabled a cold
-  cycle measured 89–135s across runs, against `MOVERS_POLL_SECONDS=120` and a
-  300-block window that spans ~135s of chain. Most of the variance is network, in the
-  metadata and market-cap stages rather than the audit (~13s of it). An overrun is
-  absorbed by the `cycleRunning` guard and logged, but it means a skipped window —
-  raise `MOVERS_MAX_LOOKBACK_BLOCKS` for headroom if you see the downtime clamp firing.
+- **Cycle time is network-bound and varies a lot.** With the audit enabled a cold
+  cycle measured **58–86s** across runs, against `MOVERS_POLL_SECONDS=120` and a
+  300-block window spanning ~135s of chain — so there is headroom, but not a wide
+  margin. Nearly all the variance is upstream latency in the market-cap and metadata
+  stages; the audit is ~13s of it. An overrun is absorbed by the `cycleRunning` guard
+  and logged, but it costs a skipped window, so raise `MOVERS_MAX_LOOKBACK_BLOCKS` if
+  you see the downtime clamp firing.
 - **The LP bot's BNB Chain path has not executed live.** Every address is verified
   on-chain and the fee ladder is corrected, but the round trip in
   [Proven live](#proven-live--on-ethereum-before-the-bnb-chain-port) ran on Ethereum

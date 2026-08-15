@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { computeFdvUsd, fdvFromSeriesValue, resolveTokenMeta, SUPPLY_TTL_MS, TokenMeta } from './onchain-mcap';
 import { SEL_TOTAL_SUPPLY, SEL_DECIMALS } from './config';
+import { sequentialCallMany } from './rpc';
 
 const word = (hex: string): string => '0x' + hex.replace(/^0x/, '').padStart(64, '0');
 const TOKEN = '0xtoken';
@@ -94,9 +95,9 @@ describe('resolveTokenMeta', () => {
     const { call, count } = caller(word('de0b6b3a7640000'), word('12'));
     const cache: Record<string, TokenMeta> = {};
     const checkedAt: Record<string, number> = {};
-    const meta = await resolveTokenMeta(TOKEN, cache, checkedAt, call, 1000);
+    const meta = await resolveTokenMeta(TOKEN, cache, checkedAt, sequentialCallMany(call), 1000);
     expect(meta).toEqual({ supply: 10n ** 18n, decimals: 18 });
-    await resolveTokenMeta(TOKEN, cache, checkedAt, call, 1000);
+    await resolveTokenMeta(TOKEN, cache, checkedAt, sequentialCallMany(call), 1000);
     expect(count()).toBe(2); // second call served from cache
   });
 
@@ -104,8 +105,8 @@ describe('resolveTokenMeta', () => {
     const { call, count } = caller(word('1'), word('12'));
     const cache: Record<string, TokenMeta> = {};
     const checkedAt: Record<string, number> = {};
-    await resolveTokenMeta(TOKEN, cache, checkedAt, call, 1000);
-    await resolveTokenMeta(TOKEN, cache, checkedAt, call, 1000 + SUPPLY_TTL_MS + 1);
+    await resolveTokenMeta(TOKEN, cache, checkedAt, sequentialCallMany(call), 1000);
+    await resolveTokenMeta(TOKEN, cache, checkedAt, sequentialCallMany(call), 1000 + SUPPLY_TTL_MS + 1);
     expect(count()).toBe(4);
   });
 
@@ -114,13 +115,13 @@ describe('resolveTokenMeta', () => {
   it('rejects an empty decimals() response instead of reading it as 0', async () => {
     const { call } = caller(word('1'), '0x');
     const cache: Record<string, TokenMeta> = {};
-    expect(await resolveTokenMeta(TOKEN, cache, {}, call, 1000)).toBeUndefined();
+    expect(await resolveTokenMeta(TOKEN, cache, {}, sequentialCallMany(call), 1000)).toBeUndefined();
     expect(cache[TOKEN]).toBeUndefined();
   });
 
   it('rejects an implausible decimals value', async () => {
     const { call } = caller(word('1'), word('ff'));
-    expect(await resolveTokenMeta(TOKEN, {}, {}, call, 1000)).toBeUndefined();
+    expect(await resolveTokenMeta(TOKEN, {}, {}, sequentialCallMany(call), 1000)).toBeUndefined();
   });
 
   it('does not cache a transient failure', async () => {
@@ -128,7 +129,19 @@ describe('resolveTokenMeta', () => {
       throw new Error('timeout');
     };
     const cache: Record<string, TokenMeta> = {};
-    expect(await resolveTokenMeta(TOKEN, cache, {}, call, 1000)).toBeUndefined();
+    expect(
+      await resolveTokenMeta(TOKEN, cache, {}, sequentialCallMany(call), 1000)
+    ).toBeUndefined();
+    expect(TOKEN in cache).toBe(false);
+  });
+
+  // A batch reports a per-item failure as `null`, which decodes to 0n exactly as a
+  // real zero would. It must be rejected as transient and NOT cached, or a momentary
+  // blip would pin a 0-decimal, 0-supply verdict on the token for the TTL.
+  it('treats a null batch entry as transient and caches nothing', async () => {
+    const cache: Record<string, TokenMeta> = {};
+    const nulls = async (): Promise<(string | null)[]> => [null, null];
+    expect(await resolveTokenMeta(TOKEN, cache, {}, nulls, 1000)).toBeUndefined();
     expect(TOKEN in cache).toBe(false);
   });
 });
