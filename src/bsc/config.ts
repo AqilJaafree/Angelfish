@@ -99,7 +99,8 @@ export const CL_POOL_MANAGER = (
 // would be built for nothing.
 
 // --- Board knobs ---
-export const TOP_N = parseInt(process.env.MOVERS_TOP_N ?? '5', 10);
+// Rows per board. Raising this raises MCAP_MAX_LOOKUPS with it — see below.
+export const TOP_N = parseInt(process.env.MOVERS_TOP_N ?? '8', 10);
 // 120s. At ~0.45s/block that is ~267 blocks, so a 300-block window gives continuous
 // coverage with a small overlap rather than a gap.
 export const POLL_SECONDS = parseInt(process.env.MOVERS_POLL_SECONDS ?? '120', 10);
@@ -121,7 +122,16 @@ export const MIN_MARKET_CAP_USD = parseInt(
 );
 // Hard ceiling on market-cap lookups per board per cycle. The walk normally stops
 // much earlier (as soon as both groups are full); this bounds the worst case.
-export const MCAP_MAX_LOOKUPS = parseInt(process.env.MOVERS_MCAP_MAX_LOOKUPS ?? '25', 10);
+//
+// MUST scale with TOP_N. The walk needs to fill TWO groups of TOP_N — main and
+// Danger Zone — so it cannot finish in fewer than 2×TOP_N lookups even if every
+// single one lands, and in practice it needs more because a token that trades on
+// several fee tiers is memoized to one lookup while still consuming rows. At
+// TOP_N=5 the old ceiling of 25 was ALREADY capping both boards every cycle
+// ("market-cap lookup ceiling reached" in production on 2026-08-15), so leaving it
+// there while raising TOP_N to 8 would have published boards that were short of
+// rows and said so only in a warning. 40 gives the 16 rows a comfortable margin.
+export const MCAP_MAX_LOOKUPS = parseInt(process.env.MOVERS_MCAP_MAX_LOOKUPS ?? '40', 10);
 
 // --- RSI candles ---
 // Candle = fixed block-count window. 667 blocks ≈ 5 min at ~0.45s/block — the same

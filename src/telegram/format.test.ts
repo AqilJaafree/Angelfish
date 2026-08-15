@@ -150,18 +150,25 @@ describe('auditBadge', () => {
 });
 
 describe('spike rendering', () => {
-  it('shows the multiple the board ranks on', () => {
-    expect(v3Board({ ...board, rows: [{ ...row, spike: 22.4 }] })).toContain('22×');
-    expect(v3Board({ ...board, rows: [{ ...row, spike: 3.25 }] })).toContain('3.3×');
-    expect(v3Board({ ...board, rows: [{ ...row, spike: 999 }] })).toContain('999×');
+  // The spike still ORDERS the board, but it is no longer shown on the row: next
+  // to a symbol and a market cap, "6.6×" read as a price move rather than as a
+  // ratio of a pool's volume against its own baseline. It stays in the stdout
+  // renderer (bsc/format.ts), which is where the ranking needs to be debuggable.
+  it('keeps the spike off the row at every magnitude', () => {
+    for (const spike of [0.6, 3.25, 22.4, 999, undefined]) {
+      const out = v3Board({ ...board, rows: [{ ...row, spike }] });
+      expect(out).not.toContain('×');
+      expect(out).not.toContain('⏳');
+    }
   });
 
-  // "1.0×" would assert the pool is flat; the truth during warm-up is that
-  // nothing is known about it yet. Those are different claims.
-  it('marks a warming-up pool distinctly from a flat one', () => {
-    const warming = v3Board({ ...board, rows: [row] });
-    expect(warming).toContain('⏳');
-    expect(warming).not.toContain('1.0×');
+  // Carried on the row and used for ordering — deleting the field would silently
+  // turn the board back into a volume ranking.
+  it('still accepts a scored row without altering the rest of it', () => {
+    const scored = v3Board({ ...board, rows: [{ ...row, spike: 22.4 }] });
+    expect(scored).toContain('<b>TEST</b>');
+    expect(scored).toContain('MC $1.2M');
+    expect(scored).toBe(v3Board({ ...board, rows: [{ ...row, spike: undefined }] }));
   });
 });
 

@@ -342,16 +342,25 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
         maxLookups: MCAP_MAX_LOOKUPS,
       });
       lookups += selection.lookups;
+      // Hitting the ceiling is only NEWS when it cost the main board rows. The walk
+      // stops when BOTH groups are full, and the Danger Zone rarely fills — most
+      // tokens that trade clear the FDV gate — so a full main board plus a short
+      // danger board is the normal shape of a healthy cycle, not a degraded one.
+      // Warning on it unconditionally cried wolf every single cycle, which is worse
+      // than silence: it trains you to ignore the one case that matters.
       if (selection.capped) {
-        logger.warn(
-          {
-            board: key,
-            lookups: selection.lookups,
-            main: selection.main.length,
-            danger: selection.danger.length,
-          },
-          'movers-v3: market-cap lookup ceiling reached, board may be incomplete'
-        );
+        const short = selection.main.length < TOP_N;
+        const detail = {
+          board: key,
+          lookups: selection.lookups,
+          main: selection.main.length,
+          danger: selection.danger.length,
+        };
+        if (short) {
+          logger.warn(detail, 'movers-v3: lookup ceiling reached before the main board filled');
+        } else {
+          logger.debug(detail, 'movers-v3: lookup ceiling reached with the main board full');
+        }
       }
       boards.push({
         key,
