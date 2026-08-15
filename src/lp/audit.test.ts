@@ -16,15 +16,15 @@ describe('tokensNeedingAudit', () => {
   // legitimately come back 🔴 (upgradeable proxies with mint). Auditing them on
   // every routine quote would train the reader to ignore the badge.
   it('skips the curated majors', () => {
-    expect(tokensNeedingAudit([TOKENS.USDC.address, TOKENS.WETH.address])).toEqual([]);
+    expect(tokensNeedingAudit([TOKENS.USDC.address, TOKENS.WBNB.address])).toEqual([]);
   });
 
   it('picks out a token reached by raw address — the case the audit is for', () => {
-    expect(tokensNeedingAudit([TOKENS.WETH.address, UNKNOWN])).toEqual([UNKNOWN]);
+    expect(tokensNeedingAudit([TOKENS.WBNB.address, UNKNOWN])).toEqual([UNKNOWN]);
   });
 
   it('is case-insensitive against a checksummed address', () => {
-    expect(tokensNeedingAudit(['0xA0b86991c6218b36c1D19D4a2e9Eb0cE3606eB48'])).toEqual([]);
+    expect(tokensNeedingAudit(['0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d'])).toEqual([]);
   });
 
   it('de-duplicates a pair of the same token', () => {

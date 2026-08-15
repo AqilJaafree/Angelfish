@@ -7,7 +7,7 @@ import * as pending from './pending';
 import { AuditEntry, auditToken, renderAuditLine, renderAuditReport, tokensNeedingAudit } from './audit';
 import { DEFAULT_TRAIL_LIMIT, fetchTrail, renderTrail } from './trail';
 import { execute, quoteExit, quoteLp, resolvePool, simulate, StepOutcome } from './plan';
-import { ERC20_ABI, NPM_ABI, WETH_DEPOSIT_ABI, fromBaseUnits, priceFromSqrt, resolveToken, toBaseUnits } from './uniswap';
+import { ERC20_ABI, NPM_ABI, WBNB_DEPOSIT_ABI, fromBaseUnits, priceFromSqrt, resolveToken, toBaseUnits } from './pancake';
 
 export interface ParsedCommand {
   name: string;
@@ -24,11 +24,11 @@ export function parse(text: string): ParsedCommand | undefined {
 }
 
 const HELP = [
-  '<b>Angelfish LP</b> — Uniswap v3, Ethereum mainnet',
+  '<b>Angelfish LP</b> — PancakeSwap v3, BNB Chain',
   '',
   '<code>/pool  &lt;A&gt; &lt;B&gt; &lt;fee&gt;</code>  pool price and tick',
   '<code>/lp    &lt;A&gt; &lt;B&gt; &lt;fee&gt; &lt;amtA&gt; &lt;amtB&gt; [range%]</code>  quote a position',
-  '<code>/wrap  &lt;amount-eth&gt;</code>  wrap ETH into WETH',
+  '<code>/wrap  &lt;amount-bnb&gt;</code>  wrap BNB into WBNB',
   '<code>/confirm &lt;code&gt;</code>  execute the quoted plan',
   '<code>/positions</code>  open positions',
   '<code>/exit  [n] [percent]</code>  withdraw — run bare to pick from a list',
@@ -104,7 +104,7 @@ async function cmdPool(args: string[]): Promise<string> {
 async function cmdLp(args: string[]): Promise<string> {
   if (args.length < 5) {
     return 'usage: <code>/lp &lt;A&gt; &lt;B&gt; &lt;fee&gt; &lt;amtA&gt; &lt;amtB&gt; [range%]</code>\n' +
-      'example: <code>/lp USDC WETH 500 100 0.03 10</code>';
+      'example: <code>/lp USDT WBNB 500 100 0.03 10</code>';
   }
   const a = resolveToken(args[0]);
   const b = resolveToken(args[1]);
@@ -146,7 +146,7 @@ async function cmdLp(args: string[]): Promise<string> {
 }
 
 // The audit header on a quote. Empty when both sides are curated majors, so a
-// routine USDC/WETH quote is not padded with a paragraph saying nothing.
+// routine USDT/WBNB quote is not padded with a paragraph saying nothing.
 export function renderAuditBlock(audits: AuditEntry[]): string {
   if (!audits.length) return '';
   const lines = ['<b>token audit</b>', ...audits.map(renderAuditLine)];
@@ -169,24 +169,24 @@ export function renderAuditBlock(audits: AuditEntry[]): string {
 }
 
 // ETH is not an ERC20, so a wallet holding only ETH cannot LP until it is
-// wrapped. This is the step that makes a single-sided WETH position reachable
+// wrapped. This is the step that makes a single-sided WBNB position reachable
 // from a wallet that was funded with nothing but gas money.
 async function cmdWrap(args: string[]): Promise<string> {
-  if (!args[0]) return 'usage: <code>/wrap &lt;amount-eth&gt;</code>  — wraps ETH into WETH';
+  if (!args[0]) return 'usage: <code>/wrap &lt;amount-bnb&gt;</code>  — wraps BNB into WBNB';
   const amount = args[0];
   const wei = toBaseUnits(amount, 18);
   if (wei <= 0n) return 'amount must be greater than zero';
-  const sim = await kh.write(TOKENS.WETH.address, 'deposit', [], {
-    abi: WETH_DEPOSIT_ABI, value: amount, simulate: true,
+  const sim = await kh.write(TOKENS.WBNB.address, 'deposit', [], {
+    abi: WBNB_DEPOSIT_ABI, value: amount, simulate: true,
   });
   if (sim.success === false || sim.wouldRevert) {
     return `❌ would revert: ${sim.revertReason ?? sim.error ?? 'unknown'}`;
   }
   const stored = pending.put({
-    summary: `wrap <b>${amount} ETH</b> → WETH`,
-    steps: [{ label: `wrap ${amount} ETH`, contract: TOKENS.WETH.address, fn: 'deposit', args: '[]', value: amount, abi: WETH_DEPOSIT_ABI }],
+    summary: `wrap <b>${amount} BNB</b> → WBNB`,
+    steps: [{ label: `wrap ${amount} BNB`, contract: TOKENS.WBNB.address, fn: 'deposit', args: '[]', value: amount, abi: WBNB_DEPOSIT_ABI }],
   });
-  return `wrap <b>${amount} ETH</b> → WETH\ngas ~${sim.gasEstimate ?? '?'}\n\nconfirm with <code>/confirm ${stored.code}</code>`;
+  return `wrap <b>${amount} BNB</b> → WBNB\ngas ~${sim.gasEstimate ?? '?'}\n\nconfirm with <code>/confirm ${stored.code}</code>`;
 }
 
 const MAX_LISTED_POSITIONS = 10;

@@ -1,14 +1,14 @@
 import { logger } from '../logger';
-import { resolveAudit } from '../mainnet/audit';
+import { resolveAudit } from '../bsc/audit';
 import { AuditResult } from '../types';
-import { EXPLORER_BASE } from '../mainnet/config';
+import { EXPLORER_BASE } from '../bsc/config';
 import { TOKENS } from './config';
 
 // Contract-verification audit for the LP bot.
 //
 // The indexer already resolves this for every token that reaches a board, so
 // the fetching, caching, TTL and rate-limit handling are reused wholesale from
-// mainnet/audit.ts rather than reimplemented. What is added here is the part
+// bsc/audit.ts rather than reimplemented. What is added here is the part
 // the boards do not need: WHICH rules fired, a record of every check, and the
 // judgement about which token in a pair is worth checking at all.
 //
@@ -60,7 +60,7 @@ export async function auditToken(
 // launches, and on blue chips it fires on things that are normal for a blue
 // chip: USDC and USDT come back 🔴 because they genuinely are upgradeable
 // proxies with a mint function. Printing that warning above every routine
-// USDC/WETH quote would train the reader to ignore the one time it matters.
+// USDT/WBNB quote would train the reader to ignore the one time it matters.
 //
 // A token reached by raw address is exactly the case the audit exists for.
 export function tokensNeedingAudit(addresses: string[]): string[] {

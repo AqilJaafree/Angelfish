@@ -25,7 +25,7 @@ describe('contractLabel', () => {
   });
 
   it('names a known token', () => {
-    expect(contractLabel(TOKENS.WETH.address)).toBe('WETH');
+    expect(contractLabel(TOKENS.WBNB.address)).toBe('WBNB');
   });
 
   // Guessing at an unknown contract would be worse than showing the address.

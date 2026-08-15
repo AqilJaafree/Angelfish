@@ -1,13 +1,13 @@
-// MUST stay first — see the note in env.ts. Every mainnet module reads
+// MUST stay first — see the note in env.ts. Every bsc module reads
 // process.env at module scope, so the file has to be loaded before they load.
 import './env';
 import fs from 'fs';
 import path from 'path';
 import { logger } from './logger';
-import { POLL_SECONDS, ETH_RPC_URL } from './mainnet/config';
-import { formatBoard } from './mainnet/format';
-import { initMovers, moversCycle, CycleResult } from './mainnet/v3/worker';
-import { initMoversV4, moversCycleV4 } from './mainnet/v4/worker';
+import { POLL_SECONDS, BSC_RPC_URL, BSC_LOG_RPC_URL } from './bsc/config';
+import { formatBoard } from './bsc/format';
+import { initMovers, moversCycle, CycleResult } from './bsc/v3/worker';
+import { initMoversCl, moversCycleCl } from './bsc/infinity/worker';
 import { isConfigured, sendBoard } from './telegram/sender';
 import { MoversBoard } from './types';
 
@@ -20,7 +20,7 @@ const TELEGRAM_ENABLED = process.env.TELEGRAM_ENABLED !== '0';
 // and know nothing about where they end up.
 async function publish(
   result: CycleResult | undefined,
-  version: 'v3' | 'v4',
+  version: 'v3' | 'cl',
   label: string
 ): Promise<void> {
   if (!result) return;
@@ -43,12 +43,13 @@ async function publish(
 async function main(): Promise<void> {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   initMovers(path.join(STATE_DIR, 'movers-v3.json'));
-  initMoversV4(path.join(STATE_DIR, 'movers-v4.json'));
+  initMoversCl(path.join(STATE_DIR, 'movers-infinity.json'));
 
   const once = process.argv.includes('--once');
   logger.info(
     {
-      rpc: ETH_RPC_URL,
+      rpc: BSC_RPC_URL,
+      logRpc: BSC_LOG_RPC_URL,
       pollSeconds: POLL_SECONDS,
       once,
       telegram: TELEGRAM_ENABLED ? (isConfigured() ? 'on' : 'unconfigured') : 'off',
@@ -56,12 +57,14 @@ async function main(): Promise<void> {
     'angelfish: starting'
   );
 
-  // v3 then v4, sequentially. They share one RPC endpoint and free providers
-  // rate-limit per-IP, so running them concurrently would only trade a shorter
-  // cycle for 429s that both workers then have to back off from.
+  // v3 then Infinity, sequentially. They share the call endpoint and free providers
+  // rate-limit per-IP, so running them concurrently would only trade a shorter cycle
+  // for 429s that both workers then have to back off from. (The v3 sweep uses its
+  // own endpoint, but everything after the sweep — every pool resolution, symbol and
+  // supply read — goes to the shared one, and that is where the volume is.)
   const tick = async (): Promise<void> => {
-    await publish(await moversCycle(), 'v3', 'Uniswap v3 (ETH)');
-    await publish(await moversCycleV4(), 'v4', 'Uniswap v4 (ETH)');
+    await publish(await moversCycle(), 'v3', 'PancakeSwap v3 (BNB)');
+    await publish(await moversCycleCl(), 'cl', 'PancakeSwap Infinity (BNB)');
   };
 
   await tick();

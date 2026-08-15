@@ -4,8 +4,8 @@ import {
   formatDangerZoneBoard,
   formatMarketCap,
   formatMoversBoardV3,
-  formatMoversBoardV4,
-  formatWeth,
+  formatMoversBoardCl,
+  formatUsdAmount,
   htmlEscape,
   TELEGRAM_MAX_LEN,
 } from './format';
@@ -13,13 +13,13 @@ import { MoversRow } from '../types';
 
 const row: MoversRow = {
   pool: '0xpool',
-  token: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+  token: '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c',
   symbol: 'TEST',
-  volumeWeth: 12_400_000_000_000_000_000n,
+  volumeUsd: 12_400_000_000_000_000_000n,
   swaps: 88,
   traders: 41,
-  feesWeth: 37_000_000_000_000_000n,
-  feeTier: '0.3%',
+  feesUsd: 37_000_000_000_000_000n,
+  feeTier: '0.25%',
   marketCapUsd: 1_200_000,
   verified: true,
   risk: 'clean',
@@ -42,17 +42,30 @@ describe('htmlEscape', () => {
   });
 });
 
-describe('formatWeth', () => {
+describe('formatUsdAmount', () => {
   it('truncates rather than rounding, so a figure never reads high', () => {
-    expect(formatWeth(1_999_999_999_999_999_999n, 2)).toBe('Ξ1.99');
+    expect(formatUsdAmount(1_999_999_999_999_999_999n, 2)).toBe('$1.99');
   });
 
   it('pads the fraction', () => {
-    expect(formatWeth(10n ** 18n, 3)).toBe('Ξ1.000');
+    expect(formatUsdAmount(10n ** 18n, 3)).toBe('$1.000');
   });
 
-  it('handles sub-wei-scale dust without losing the sign', () => {
-    expect(formatWeth(-(10n ** 17n), 2)).toBe('-Ξ0.10');
+  it('handles dust without losing the sign', () => {
+    expect(formatUsdAmount(-(10n ** 17n), 2)).toBe('-$0.10');
+  });
+
+  // BSC volumes are USD figures, routinely six or seven digits, where the Ethereum
+  // build's Ξ amounts were small enough to read unseparated.
+  it('separates thousands in the whole part', () => {
+    expect(formatUsdAmount(1_234_567n * 10n ** 18n, 2)).toBe('$1,234,567.00');
+  });
+
+  // An unpriced row (a BNB-quoted pool during a failed BNB/USD read) must not read
+  // as zero volume.
+  it('renders an unknown amount as a dash, never as $0', () => {
+    expect(formatUsdAmount(undefined)).toBe('—');
+    expect(formatUsdAmount(0n, 2)).toBe('$0.00');
   });
 });
 
@@ -100,7 +113,7 @@ describe('rendered boards are valid Telegram HTML', () => {
 
   it('holds for every board variant, including the rare branches', () => {
     assertWellFormed(formatMoversBoardV3({ ...board, rows: [row, hostile] }));
-    assertWellFormed(formatMoversBoardV4({ ...board, rows: [hostile] }));
+    assertWellFormed(formatMoversBoardCl({ ...board, rows: [hostile] }));
     assertWellFormed(
       formatDangerZoneBoard({ ...board, rows: [hostile], label: '<b>evil</b> label' })
     );
@@ -109,12 +122,12 @@ describe('rendered boards are valid Telegram HTML', () => {
   it('holds for a row whose every optional field is absent', () => {
     const bare: MoversRow = {
       pool: '0xp',
-      token: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+      token: '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c',
       symbol: 'BARE',
-      volumeWeth: 0n,
+      volumeUsd: 0n,
       swaps: 0,
       traders: 0,
-      feesWeth: 0n,
+      feesUsd: 0n,
     };
     assertWellFormed(formatMoversBoardV3({ ...board, rows: [bare] }));
   });
@@ -153,19 +166,19 @@ describe('board rendering', () => {
     const out = formatMoversBoardV3(board);
     expect(out).toContain('<b>TEST</b>');
     expect(out).toContain('✅🟢');
-    expect(out).toContain('(0.3%)');
+    expect(out).toContain('(0.25%)');
     expect(out).toContain('MC $1.2M');
     expect(out).toContain('88 swaps');
     expect(out).toContain('href=');
-    expect(out).toContain('0xc02a…6cc2');
+    expect(out).toContain('0xbb4c…095c');
   });
 
   it('labels each version and the danger board\'s origin', () => {
-    expect(formatMoversBoardV3(board)).toContain('Uniswap v3');
-    expect(formatMoversBoardV4(board)).toContain('Uniswap v4');
-    const danger = formatDangerZoneBoard({ ...board, label: 'Uniswap v4 (ETH)' });
+    expect(formatMoversBoardV3(board)).toContain('PancakeSwap v3');
+    expect(formatMoversBoardCl(board)).toContain('PancakeSwap Infinity');
+    const danger = formatDangerZoneBoard({ ...board, label: 'PancakeSwap Infinity (BNB)' });
     expect(danger).toContain('Danger Zone');
-    expect(danger).toContain('Uniswap v4 (ETH)');
+    expect(danger).toContain('PancakeSwap Infinity (BNB)');
   });
 
   it('collapses the span when the window is a single block', () => {

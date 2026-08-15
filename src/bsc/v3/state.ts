@@ -1,0 +1,47 @@
+import fs from 'fs';
+import { PoolMeta } from './swaps';
+import { CandleState } from '../candles';
+import { VolumeState } from '../volume-history';
+import { AuditResult } from '../../types';
+import { TokenMeta } from '../onchain-mcap';
+import { BnbUsdState } from '../bnb-price';
+
+export interface MoversState {
+  lastProcessedBlock: number;
+  meta: Record<string, PoolMeta | null>; // pool -> anchor metadata, or null
+  symbols: Record<string, string>; // token -> symbol
+  audit: Record<string, AuditResult>; // token -> cached verification + risk scan
+  auditCheckedAt: Record<string, number>; // token -> ms epoch (TTLs the negatives)
+  supplies: Record<string, TokenMeta>; // token -> { supply (string), decimals }
+  suppliesCheckedAt: Record<string, number>; // token -> ms epoch (TTLs ALL entries)
+  bnbUsd?: BnbUsdState;
+  candles: Record<string, CandleState>; // pool -> 5-min candle state
+  volumes: Record<string, VolumeState>; // pool -> bucketed volume, feeds the spike rank
+}
+
+function empty(): MoversState {
+  return {
+    lastProcessedBlock: 0,
+    meta: {},
+    symbols: {},
+    audit: {},
+    auditCheckedAt: {},
+    supplies: {},
+    suppliesCheckedAt: {},
+    candles: {},
+    volumes: {},
+  };
+}
+
+export function loadState(file: string): MoversState {
+  try {
+    const s = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<MoversState>;
+    return { ...empty(), ...s, bnbUsd: s.bnbUsd };
+  } catch {
+    return empty();
+  }
+}
+
+export function saveState(file: string, state: MoversState): void {
+  fs.writeFileSync(file, JSON.stringify(state));
+}

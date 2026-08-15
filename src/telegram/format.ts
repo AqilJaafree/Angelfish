@@ -1,5 +1,5 @@
 import { MoversBoard, MoversRow, RiskLevel } from '../types';
-import { EXPLORER_BASE } from '../mainnet/config';
+import { EXPLORER_BASE } from '../bsc/config';
 
 // Telegram's hard limit on a single sendMessage body.
 export const TELEGRAM_MAX_LEN = 4096;
@@ -20,15 +20,22 @@ function shortAddr(a: string): string {
   return a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a;
 }
 
-// Raw wei -> "Ξ<whole>.<decimals>", truncated rather than rounded so a figure
-// never reads higher than what actually traded.
-export function formatWeth(wei: bigint, decimals = 4): string {
-  const neg = wei < 0n;
-  const v = neg ? -wei : wei;
+// A USD amount held as a bigint in 1e18 fixed point -> "$<whole>.<decimals>",
+// truncated rather than rounded so a figure never reads higher than what traded.
+//
+// USD rather than the Ethereum build's Ξ because pools on BSC do not share one
+// anchor — see bsc/anchors.ts. `undefined` (a BNB-quoted pool whose BNB/USD read
+// failed) renders as a dash rather than $0, so an unpriced row is never mistaken
+// for a dead one. Thousands separators are applied to the whole part, which the
+// Ethereum build did not need: an ETH figure is small, a USD one routinely is not.
+export function formatUsdAmount(value: bigint | undefined, decimals = 2): string {
+  if (value == null) return '—';
+  const neg = value < 0n;
+  const v = neg ? -value : value;
   const base = 10n ** 18n;
-  const whole = v / base;
+  const whole = (v / base).toLocaleString('en-US');
   const frac = (v % base).toString().padStart(18, '0').slice(0, decimals);
-  return `${neg ? '-' : ''}Ξ${whole.toString()}.${frac}`;
+  return `${neg ? '-' : ''}$${whole}${decimals > 0 ? `.${frac}` : ''}`;
 }
 
 export function formatUsd(usd: number): string {
@@ -52,7 +59,7 @@ export function formatUsd(usd: number): string {
 // with `can't parse entities: Unsupported start tag "$1"`, and drops the WHOLE
 // board — not just the offending row. It is a rare branch (only tokens priced
 // under a dollar reach it) hiding behind a common one, so it fails long after
-// the transport looks proven. The stdout formatter in mainnet/format.ts keeps
+// the transport looks proven. The stdout formatter in bsc/format.ts keeps
 // the bare `<`, which is correct there.
 export function formatMarketCap(usd: number | undefined): string {
   if (usd == null) return 'MC —';
@@ -101,8 +108,8 @@ function renderRow(r: MoversRow, i: number): string {
     `${medal} <b>${htmlEscape(r.symbol)}</b> <b>${formatSpike(r.spike)}</b>` +
     `${auditBadge(r.verified, r.risk)}${tier} · ` +
     `${formatRsiTag(r.rsi, r.rsiLabel)} · ${formatMarketCap(r.marketCapUsd)}\n` +
-    `    ${formatWeth(r.volumeWeth, 2)} vol · ${r.swaps} swaps · ${r.traders} traders · ` +
-    `${formatWeth(r.feesWeth, 3)} fees\n` +
+    `    ${formatUsdAmount(r.volumeUsd, 2)} vol · ${r.swaps} swaps · ${r.traders} traders · ` +
+    `${formatUsdAmount(r.feesUsd, 2)} fees\n` +
     `    ↳ ${link}`
   );
 }
@@ -125,15 +132,15 @@ function frame(title: string, board: MoversBoard): string {
 }
 
 export function formatMoversBoardV3(board: MoversBoard): string {
-  return frame('🏆 <b>Ethereum Uniswap v3 — Top Movers</b>', board);
+  return frame('🥞 <b>PancakeSwap v3 — Top Movers</b>', board);
 }
 
-export function formatMoversBoardV4(board: MoversBoard): string {
-  return frame('🦄 <b>Ethereum Uniswap v4 — Top Movers</b>', board);
+export function formatMoversBoardCl(board: MoversBoard): string {
+  return frame('♾️ <b>PancakeSwap Infinity — Top Movers</b>', board);
 }
 
 // Sub-threshold and unknown-market-cap tokens from BOTH boards land in one place,
 // so the header has to carry the origin label.
 export function formatDangerZoneBoard(board: MoversBoard): string {
-  return frame(`⚠️ <b>Danger Zone — ${htmlEscape(board.label ?? 'Uniswap')}</b>`, board);
+  return frame(`⚠️ <b>Danger Zone — ${htmlEscape(board.label ?? 'PancakeSwap')}</b>`, board);
 }

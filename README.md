@@ -1,21 +1,21 @@
 # angelfish
 
-Uniswap **v3 + v4** on **Ethereum mainnet**, in two independent processes that
+**PancakeSwap v3 + Infinity** on **BNB Chain**, in two independent processes that
 share nothing but a `.env` and a logger:
 
 | | What it does | Run it |
 |---|---|---|
 | **the indexer** | reads the chain — sweeps Swap logs, ranks tokens onto a Top Movers board and a Danger Zone board, posts to Telegram | `npm start` |
-| **the LP bot** | writes to the chain — a DM-only Telegram bot that opens and closes Uniswap v3 positions, signing through KeeperHub | `npm run start:lp` |
+| **the LP bot** | writes to the chain — a DM-only Telegram bot that opens and closes PancakeSwap v3 positions, signing through KeeperHub | `npm run start:lp` |
 
-The indexer never signs anything and the bot never indexes. Note they point at
-different protocols on purpose: the boards index **v4**, the bot LPs into **v3**
-([why](#uniswap-v3-not-v4--deliberately)).
+The indexer never signs anything and the bot never indexes. They point at different
+protocols on purpose: the boards index **both** v3 and Infinity, the bot LPs into
+**v3** ([why](#pancakeswap-v3-not-infinity--deliberately)).
 
 The indexer sweeps Swap logs in a rolling block window, works out which pools are
-ETH-paired, aggregates per-token trading activity, prices each token on-chain, and
-ranks the result into a Top Movers board plus a Danger Zone board for anything below
-the market-cap gate. Boards print to stdout and post to Telegram.
+anchored in BNB or a USD stable, aggregates per-token trading activity, prices each
+token on-chain, and ranks the result into a Top Movers board plus a Danger Zone board
+for anything below the market-cap gate. Boards print to stdout and post to Telegram.
 
 ## Quick start
 
@@ -30,23 +30,24 @@ npm test
 
 ## The method
 
-Both versions run the same seven steps. Only steps 1–3 differ between v3 and v4.
+Both workers run the same seven steps. Only steps 1–3 differ between v3 and Infinity.
 
-| # | Step | v3 | v4 |
+| # | Step | PancakeSwap v3 | PancakeSwap Infinity (CL) |
 |---|------|----|----|
-| 1 | **Find the swaps** | `eth_getLogs` on the v3 Swap `topic0`, **no address filter** — the pool set is discovered from the logs, so a brand-new pool is visible on its first trade | `eth_getLogs` filtered to the **PoolManager singleton** + v4 Swap `topic0`; every v4 pool trades through that one contract |
-| 2 | **Identify the pool** | `token0()` / `token1()` / `fee()` on the pool address, then a **factory check** | v4 pools aren't contracts — a `bytes32` PoolId is `keccak256(PoolKey)`, one-way — so the key is read from `PositionManager.poolKeys(bytes25)`, with `Initialize` logs from the same window folded in |
-| 3 | **Keep the ETH pairs** | one side must be WETH | one side must be WETH **or native ETH** (`address(0)`) |
-| 4 | **Aggregate the window** | Σ\|ETH-leg amount\| as volume, unique swappers as traders, fee = tier × input side | same, except the fee **charged on each swap arrives in the event**, so dynamic-fee pools value correctly with no extra call |
-| 5 | **Record a candle** | last `sqrtPriceX96` of the window → a 5-minute (25-block) bucket, forward-filled across tradeless buckets, feeding RSI-14 | same |
-| 6 | **Price the token** | FDV = `totalSupply × price-in-pool × ETH/USD`, with ETH/USD read from the USDC/WETH 0.05% pool's `slot0` | same |
+| 1 | **Find the swaps** | `eth_getLogs` on the v3 Swap `topic0`, **no address filter** — the pool set is discovered from the logs, so a brand-new pool is visible on its first trade | `eth_getLogs` filtered to the **CLPoolManager singleton** + CL Swap `topic0`; every Infinity CL pool trades through that one contract |
+| 2 | **Identify the pool** | `token0()` / `token1()` / `fee()` on the pool address, then a **factory check** | Infinity pools aren't contracts — a `bytes32` PoolId is `keccak256(PoolKey)`, one-way — so the key is read back from `CLPoolManager.poolIdToPoolKey(bytes32)` |
+| 3 | **Keep the anchored pairs** | exactly one side must be an anchor: WBNB, USDT, USDC or USD1 | same, plus native BNB (`address(0)`) |
+| 4 | **Aggregate the window** | Σ\|anchor-leg amount\| as volume, unique swappers as traders, fee = tier × input side | same, except the fee **charged on each swap arrives in the event**, so hook-managed pools value correctly with no extra call |
+| 5 | **Record a candle** | last `sqrtPriceX96` of the window → a 5-minute (667-block) bucket, forward-filled across tradeless buckets, feeding RSI-14 | same |
+| 6 | **Price the token** | FDV = `totalSupply × price-in-pool × anchor/USD`, where a stable anchor is $1 and BNB comes from the WBNB/USDT `slot0` | same |
 | 7 | **Rank and split** | ranked by **volume spike** against each pool's own baseline; established tokens dropped; then ≥ `$300k` FDV → main board, below or unknown → **Danger Zone** | same |
 
 Two properties are what make the boards trustworthy rather than merely populated:
 
 - **Fee valuation and market cap are computed from the pool the token actually
-  trades in**, never from an external price API. One `slot0` read on the USDC/WETH
-  pool prices every row on the board.
+  trades in**, never from an external price API. Most rows need no price feed at
+  all — a BSC stablecoin is 18 decimals, so a stable-quoted pool's price *is* a USD
+  price.
 - **Every "unknown" fails safe.** An unreadable market cap is not evidence of a
   qualifying one, so the row lands in Danger Zone. A transient RPC failure is never
   cached as a negative verdict — only a *confirmed* one is.
@@ -59,100 +60,159 @@ timescale of the thing it holds:
 | Cache | Keyed by | Expiry | Why |
 |-------|----------|--------|-----|
 | v3 pool meta | pool address | permanent | `token0/token1/fee` are immutable |
-| v4 pool key | PoolId | permanent when found, 24h when not | a `PoolKey` is immutable; an unresolved id might just not have been seen yet |
+| Infinity pool key | PoolId | permanent when found, 24h when not | a `PoolKey` is immutable; an unresolved id might just not have been seen yet |
 | pool volume history | pool / PoolId | rolling 24 buckets (~2h) | the spike baseline; older activity should stop counting |
 | token supply + decimals | token | 1 hour | `totalSupply()` is **not** immutable — a mint should move the cap |
 | verification + audit | token | permanent when verified, 6h when not | source can't be un-verified, but an unverified token gets verified later |
 | symbol | token | permanent | — |
 
-State persists to `tmp/movers-v3.json` and `tmp/movers-v4.json`, so a restart
+State persists to `tmp/movers-v3.json` and `tmp/movers-infinity.json`, so a restart
 resumes the block cursor rather than replaying.
 
 ## Design notes
 
 The non-obvious decisions, each also commented at the code site.
 
-### `eth_getLogs` is range-capped — chunk up front (`mainnet/rpc.ts`)
+### Two RPC endpoints, because the v3 sweep is topic-only (`bsc/rpc.ts`)
 
-Free mainnet endpoints cap the block span hard. blastapi answers a 1000-block query
-with:
-
-```
--32600 "You can make eth_getLogs requests with up to a 10 block range"
-```
-
-So the range is chunked to `ETH_MAX_LOG_RANGE` (default 10) *before* the request,
-rather than bisected after rejection — bisecting spends a rejected round-trip at
-every level of the recursion, ~31 wasted calls to get a 300-block window down to 10.
-A reactive split is kept as a backstop, because some providers cap on **result
-count** instead, which chunking can't predict.
-
-Raise `ETH_MAX_LOG_RANGE` on a paid endpoint; every increase is one fewer round-trip
-per cycle.
-
-### Not every RPC allows the v3 sweep at all
-
-The v3 sweep is topic-only by design (that's what makes new pools self-discovering),
-and some endpoints refuse those outright. Measured 2026-08-13:
+The v3 sweep has **no address filter** by design — that is what makes a new pool
+self-discovering on its first trade. Almost every free BSC endpoint refuses such a
+query. Measured across nine on 2026-08-15:
 
 | Endpoint | Topic-only `eth_getLogs` |
 |---|---|
-| `eth-mainnet.public.blastapi.io` | ✅ (10-block cap) — the default |
-| `eth.drpc.org` | ✅ (10-block cap, needs a browser `User-Agent` or it 403s) |
-| `ethereum-rpc.publicnode.com` | ❌ `-32701 "Please specify an address in your request"` |
-| `eth.merkle.io` | ❌ method not found |
+| `bsc.blockrazor.xyz` | ✅ 25-block cap — the sweep default |
+| `1rpc.io/bnb` | ✅ 50-block cap |
+| `bsc-rpc.publicnode.com` | ❌ `-32701 "Please specify an address in your request"` |
+| `bsc-dataseed.bnbchain.org` | ❌ `-32005 limit exceeded` |
+| `bsc-mainnet.public.blastapi.io` | ❌ rate-limited |
+| `bsc.meowrpc.com` | ❌ `eth_getLogs is not supported` |
+| `bsc.drpc.org`, `rpc.ankr.com/bsc` | ❌ public rate limit / API key required |
 
-### v3 forks emit the identical Swap event — ask the factory (`mainnet/v3/metadata.ts`)
+So the config splits in two. `BSC_LOG_RPC_URL` serves **only** the v3 sweep; its rate
+limit is far too tight for what follows. Everything else — every `eth_call`, plus the
+Infinity sweep, which names an address and so is unrestricted — goes to `BSC_RPC_URL`.
 
-Mainnet has a long tail of byte-identical v3 forks (SushiSwap v3 and others) emitting
-the **same** `topic0` with the **same** ABI. The unfiltered sweep picks them up and
-nothing downstream can tell them apart from the real thing.
+Ranges are chunked to `BSC_MAX_LOG_RANGE` *before* the request rather than bisected
+after rejection; bisecting spends a rejected round-trip at every level of the
+recursion. A reactive split is kept as a backstop for providers that cap on **result
+count** instead, which chunking can't predict.
+
+### `eth_call` is batched, and on BSC that is not an optimisation (`bsc/rpc.ts`)
+
+A 300-block window on Ethereum surfaces ~40 pools. The same window here surfaces
+**200–280**, and BSC's long tail means most are new each cycle rather than cache hits.
+At a measured 192ms per sequential call, resolving one window's pools cost **191s
+against a 120s poll interval** — the indexer could not keep pace with the chain at
+all.
+
+Pool resolution is therefore phased and batched: one JSON-RPC batch for every
+`token0`/`token1` pair, a second for `fee()` on the survivors, a third for the factory
+check on those. Measured end to end, a **cold cycle went from 270s to 43s**.
+
+A per-item error in a batch yields `null` for that item rather than throwing, so one
+bad address can't discard a batch of good answers — and `null` (transient, never
+cached) stays distinguishable from `0x` (a definitive "not a pool", always cached).
+
+### v3 forks emit the identical Swap event — ask the factory (`bsc/v3/metadata.ts`)
+
+BSC has a long tail of byte-identical PancakeSwap v3 forks emitting the **same**
+`topic0` with the **same** ABI. The unfiltered sweep picks them up and nothing
+downstream can tell them apart from the real thing.
 
 So each new pool is checked against the canonical factory:
-`getPool(token0, token1, fee) == pool`. One extra `eth_call`, once, cached alongside
+`getPool(token0, token1, fee) == pool`. One extra `eth_call`, once, batched alongside
 reads already being made. A *failed* verification call is deliberately **not** cached
 — a timeout must not blacklist a genuine pool for the life of the process.
 
-### v4 pool metadata: `poolKeys`, not an `Initialize` scan (`mainnet/v4/metadata.ts`)
+### The anchor is a set, not a currency (`bsc/anchors.ts`)
 
-The obvious way to recover a PoolId's currencies is to scan `Initialize` logs
-filtered on that id. On mainnet that range is over 4 million blocks (PoolManager
-deployed at **21,688,329** — verified by `eth_getCode` being empty at 21,688,328 and
-48,020 bytes at 21,688,329), and at a 10-block cap it would cost **~400,000 requests
-per unknown pool**.
+This is the one part of the port that is not a rename. On Ethereum the anchor is WETH,
+full stop, so a pool's volume is unambiguously an amount of wei. BSC has no
+equivalent — WBNB is not the centre of gravity here, USD stables are, and neither
+alone is enough. Measured over a 300-block window:
 
-Instead the PoolKey is read back from `PositionManager.poolKeys(bytes25)`, the mapping
-v4 maintains for exactly this purpose. One `eth_call`, no range to negotiate, works
-for a pool of any age. Measured on a live 9-block window: **50 of 52** PoolIds
-resolved. The remaining two are pools initialized directly on the PoolManager rather
-than through PositionManager; those are covered by folding each window's `Initialize`
-logs into the registry as they happen, and otherwise expire under a 24h negative TTL.
+| anchor set | PancakeSwap v3 pools | tokens | Infinity CL pools | CL swaps |
+|---|---|---|---|---|
+| BNB only | 82/264 | 76 | 18/100 | 1,502/4,232 |
+| USDT only | 139/264 | 122 | 72/100 | 2,512/4,232 |
+| **BNB + WBNB + USDT/USDC/USD1** | **225/264** | **185** | **84/100** | **3,729 (88%)** |
+
+A straight WBNB-for-WETH substitution would have quietly indexed about 40% of the
+chain and produced a board that looked fine.
+
+Two consequences:
+
+- **Selection is an XOR, not "either side is an anchor."** A pool with anchors on
+  *both* sides is a stable/stable or BNB/stable pair with no subject token. On BSC
+  that is not an edge case — the WBNB/USDT pools are among the busiest on the chain —
+  and admitting them would rank USDT on a movers board for trading against BNB.
+- **Volume is denominated in USD**, because a figure quoted in one row's anchor is not
+  comparable to the next row's. Aggregates stay in raw anchor units and convert once,
+  at render time. Every BSC anchor is 18 decimals, so a stable amount *is* a USD
+  amount and no float touches it.
+
+The volume **history** deliberately stays in anchor units. A pool always uses the same
+anchor, so its own baseline is self-consistent — and a failed BNB/USD read then cannot
+corrupt it. Converting first would skip the BNB-quoted pools for that cycle, and
+skipped buckets are zero-filled, so a transient price failure would understate those
+pools' baselines and inflate their next spike.
+
+### Infinity pool metadata: one mapping, no fallback (`bsc/infinity/metadata.ts`)
+
+A PoolId is `keccak256(abi.encode(PoolKey))` — one-way, so the key cannot be recovered
+by arithmetic. It is read back from `CLPoolManager.poolIdToPoolKey(bytes32)`.
+
+**This is materially better than the Uniswap v4 equivalent, and it removes a whole
+subsystem.** On Ethereum the key lives on the *PositionManager*, keyed by a truncated
+`bytes25`, and only covers pools initialized *through* the PositionManager — measured
+at 50 of 52, so that build carries an `Initialize`-log indexer as a second source for
+the stragglers. Infinity stores the key on the PoolManager itself, against the full
+`bytes32`, written on every initialize regardless of route: **107 of 107** live
+PoolIds resolved when measured. There is no second source here because there would be
+nothing for it to catch.
 
 Two traps this path has to avoid, both covered by tests:
 
-- The id is passed as **`bytes25`, which is left-aligned** — high 25 bytes kept, low
-  7 zeroed. Right-aligning it (the ordinary integer convention) reads the wrong
-  mapping slot and returns an empty key, indistinguishable from "unknown pool".
+- The returned tuple is **six words** — `currency0, currency1, hooks, poolManager,
+  fee, parameters` — against Uniswap v4's five, and `hooks` moves from last to third.
+  Decoding one with the other's offsets reads `hooks` as a fee.
 - An empty key can't be detected by a zero `currency0`, because **`address(0)` is
-  legitimate** — it's how v4 represents native ETH. Emptiness is judged on
-  `tickSpacing`, which every real PoolKey has non-zero.
+  legitimate** — it's how Infinity represents native BNB. Emptiness is judged on
+  `parameters`, which encodes tick spacing and hook flags and is non-zero for every
+  real pool.
 
-### Boards rank on a volume spike, not absolute volume (`mainnet/volume-history.ts`)
+### The Swap events are *not* Uniswap's, but the decoders are (`bsc/decode.ts`)
 
-Absolute volume is a near-constant property of a pool. USDC/WETH is the most heavily
-traded pool on almost every window — which is exactly what makes it uninteresting on
-a *movers* board. What changes when something happens is a pool's volume **relative to
+Both PancakeSwap events add trailing fields, so both `topic0` hashes differ from their
+Uniswap counterparts:
+
+| | signature | vs. Uniswap |
+|---|---|---|
+| PancakeSwap v3 | `Swap(address,address,int256,int256,uint160,uint128,int24,uint128,uint128)` | +2 trailing `protocolFees` |
+| Infinity CL | `Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24,uint16)` | +1 trailing `protocolFee` |
+
+Because the extra fields are **appended** rather than inserted, every word the
+decoders read keeps its index, and both decode functions are unchanged from the
+Ethereum build. Only the constants move.
+
+One guard did have to tighten. Infinity's per-swap fee is set by a hook, and a live
+sample contained swaps reporting **980,310 pips — 98%**. That is under the `1e6`
+ceiling the Ethereum build used, so its guard would have admitted it and one such swap
+would dominate a board's fee column. The ceiling is now a plausible maximum
+(`MOVERS_MAX_FEE_PIPS`, default 10%); volume is unaffected either way.
+
+### Boards rank on a volume spike, not absolute volume (`bsc/volume-history.ts`)
+
+Absolute volume is a near-constant property of a pool. The busiest pool is the busiest
+pool on almost every window — which is exactly what makes it uninteresting on a
+*movers* board. What changes when something happens is a pool's volume **relative to
 its own recent baseline**, so that ratio is what the boards rank on and what each row
 leads with (`22×`).
 
-Measured live with the denylist off: USDC scored `1.2×` and `0.2×` and fell to 3rd and
-4th, while a pool that had woken up scored `54×` and took the top slot. Blue chips
-score ~1× by construction, so they stop needing to be excluded by name.
-
-**The comparison is per-block rate, not raw totals.** Windows are not a fixed size —
-steady state sweeps ~10 blocks, a cold start clamps to `MAX_LOOKBACK_BLOCKS` (300),
-and a history bucket spans 25. Comparing totals would largely measure how many blocks
-each side happened to cover, so both sides are divided by their block count first.
+**The comparison is per-block rate, not raw totals.** Windows are not a fixed size, so
+comparing totals would largely measure how many blocks each side happened to cover;
+both sides are divided by their block count first.
 
 Three details the score depends on:
 
@@ -160,57 +220,85 @@ Three details the score depends on:
   that did not trade for an hour genuinely had no volume then. Dropping those buckets
   would compute the baseline only over buckets where it happened to trade, overstating
   exactly the quiet pools whose sudden activity is worth surfacing.
-- **A volume floor** (`SPIKE_MIN_VOLUME_WEI`, default 0.05 ETH) gates eligibility.
-  Without it a pool that normally trades dust tops the board on a 400× multiple of
-  nothing — the arithmetic is right and the row is worthless.
+- **A volume floor** (`SPIKE_MIN_VOLUME_USD`, default $50) gates eligibility. Without
+  it a pool that normally trades dust tops the board on a 400× multiple of nothing —
+  the arithmetic is right and the row is worthless. The floor is in **USD** even
+  though the baseline is in anchor units: a floor has to mean the same thing to every
+  pool to be a floor at all, and "0.05 of the anchor" is $45 for a BNB pool and five
+  cents for a USDT one.
 - **Warm-up is explicit.** A pool needs `SPIKE_MIN_BUCKETS` (default 3, ≈15 min) of
   history before its baseline means anything. Until then it has no score and is ranked
-  by volume *behind* every scored pool, and renders `⏳` rather than `1.0×` — the two
-  are different claims, and showing `1.0×` would assert a pool is flat when the truth
-  is that nothing is known about it yet.
+  by USD volume *behind* every scored pool, and renders `⏳` rather than `1.0×` — the
+  two are different claims, and showing `1.0×` would assert a pool is flat when the
+  truth is that nothing is known about it yet.
 
 A restart with a volume attached keeps the history, so warm-up is paid once.
 
-### Established tokens are filtered by address, never by symbol (`mainnet/denylist.ts`)
+### Established tokens are filtered by address, never by symbol (`bsc/denylist.ts`)
 
 Kept as a second line of defence rather than the primary one. The spike ranking already
 demotes blue chips on its own; the list makes them absent instead of merely low, and
 covers the warm-up window before any baseline exists. `MOVERS_DENYLIST_ENABLED=0`
 turns it off and leaves the ranking to do the work.
 
+Stablecoins, bridged majors (BTCB, peg-ETH), and the BNB-chain DeFi set including CAKE
+are excluded. Without it the boards are the same dozen names every cycle, which buries
+the movement the boards exist to surface.
 
-Stablecoins, wrapped majors, ETH liquid-staking derivatives and DeFi blue chips are
-excluded. Without it the boards are the same dozen names every cycle — USDC, USDT and
-WBTC alone routinely took three of the five v3 slots — which buries the movement the
-boards exist to surface.
+The stablecoins are both anchors *and* denylisted, deliberately: a USDT/USDC pool is
+dropped upstream as anchor-on-both-sides, but USDT paired against a non-anchor stable
+reaches the board as the tracked side.
 
 **The match is on address, and that is a correctness requirement rather than a style
 choice.** A symbol is not unique and not authenticated: any contract can name itself
-`USDC`. Matching the string would hide every impostor that picks a blue-chip ticker —
-and a fake `USDC` trading against WETH is precisely what the Danger Zone board is for.
+`USDT`. Matching the string would hide every impostor that picks a blue-chip ticker —
+and a fake `USDT` trading against WBNB is precisely what the Danger Zone board is for.
 Symbol matching would turn the filter into a cloaking device for the scams it should
 be surfacing. So an impostor stays on the boards and lands in Danger Zone on its
 market cap like anything else.
 
 The filter runs **before** the market-cap walk, so an excluded token doesn't also
-spend one of the cycle's 25 lookups establishing a $49B cap nobody needed.
+spend one of the cycle's 25 lookups.
 
-Every listed address was verified against its on-chain `symbol()` before being added.
 `MOVERS_DENYLIST` adds more, `MOVERS_ALLOWLIST` forces one back on, and
 `MOVERS_DENYLIST_ENABLED=0` turns the whole thing off.
 
 ### The USD anchor is a pool, not an API
 
-ETH/USD comes from the **USDC/WETH 0.05% pool** (`0x88e6…5640`, confirmed via
-`factory.getPool(USDC, WETH, 500)`). Its `token0` ordering is read from the pool
-rather than hardcoded, so repointing `ETH_USDC_WETH_POOL` can't silently invert the
-rate.
+BNB/USD comes from the **PancakeSwap v3 WBNB/USDT 0.01% pool**
+(`0x172f…f849`, confirmed via `factory.getPool(WBNB, USDT, 100)` — the 0.01% tier is
+the active one, at 840 swaps in a 400-block sample against 14 for the 0.05% pool). Its
+`token0` ordering is read from the pool rather than hardcoded, so repointing
+`BSC_WBNB_USDT_POOL` can't silently invert the rate.
 
-### Cadence follows ~12s blocks
+It matters less here than ETH/USD did on Ethereum, and deliberately so: only the
+BNB-anchored rows need it. A failure costs part of a board rather than all of it.
 
-`BLOCKS_PER_CANDLE=25` ≈ 5 min and `MAX_LOOKBACK_BLOCKS=300` ≈ 1 h of catch-up after
-downtime. `MOVERS_POLL_SECONDS=120`, because a measured cycle is ~73s warm on the free
-endpoint and a 60s interval would fire mid-cycle every time.
+### Contract verification comes from Etherscan V2, not Blockscout (`bsc/audit.ts`)
+
+**There is no Blockscout instance for BNB Chain** — `bsc.blockscout.com`,
+`bscscan.blockscout.com`, `binance.blockscout.com` and `bnb.blockscout.com` all 404 —
+and BscScan's own V1 API is retired, answering every request with *"You are using a
+deprecated V1 endpoint."* The only general source API is Etherscan's V2 multichain
+endpoint at `chainid=56`, which needs a free key.
+
+That is a different provider with a different response shape, not a changed base URL.
+Etherscan packs a multi-file verification into one `SourceCode` string holding a JSON
+document wrapped in an **extra pair of braces**; a single-file contract arrives as
+plain Solidity. Both are flattened before scanning, because a mint or blacklist
+usually lives in an inherited base and scanning only the entry file would quietly stop
+catching the common case.
+
+Without `BSC_EXPLORER_API_KEY` the lookups are skipped entirely rather than firing
+calls that can only fail.
+
+### Cadence follows ~0.45s blocks
+
+BSC blocks are roughly 27× faster than Ethereum's, so the block-count knobs are not
+transferable. `BLOCKS_PER_CANDLE=667` keeps a candle at ~5 min — the same duration as
+the Ethereum build's 25 blocks, which is what matters, since RSI-14 is then 14
+five-minute candles either way. `MOVERS_POLL_SECONDS=120` is ~267 blocks, so a
+300-block window gives continuous coverage with a small overlap rather than a gap.
 
 ### Transport is dependency-free and dispatched from `index.ts`
 
@@ -302,9 +390,9 @@ files.
 ## Reading a row
 
 ```
-🥇 WOO 54× ✅🟢 (0.3%) · RSI — · MC $32.0M
-    Ξ0.1581 vol · 12 swaps · 8 traders · Ξ0.0006 fees
-    ↳ 0x4691…5d4b
+🥇 ROBO 54× ✅🟢 (0.0099%) · RSI — · MC $3.6M
+    $288.6K vol · 314 swaps · 35 traders · $28.58 fees
+    ↳ 0x475c…f6e2
 ```
 
 Line 1 is identity and signals, line 2 is activity in the window, line 3 is the
@@ -319,10 +407,15 @@ The two badges answer two different questions and are kept separate on purpose:
 different situations.
 
 > **Calibration note.** The risk heuristic was tuned against memecoin launches. On
-> mainnet blue-chips it fires on things that are normal for them: USDC and USDT come
+> blue-chips it fires on things that are normal for them: USDT and USDC come
 > back `✅🔴` because they genuinely are upgradeable proxies with a `mint` function.
 > The verdict is *correct* per the rules; the rules are calibrated for a different
 > population. Treat 🔴 on an established token as "read the flags", not "rug".
+
+Volume and fees are in **USD**, not in an amount of the anchor: rows on one board can
+be quoted in BNB, USDT, USDC or USD1, so an anchor-denominated figure would not be
+comparable between two rows. A `—` there means the value could not be converted — a
+BNB-quoted pool during a failed BNB/USD read — and is deliberately not rendered as $0.
 
 `MC` is fully-diluted (total supply × price), not circulating.
 
@@ -333,21 +426,22 @@ src/
   index.ts                  cycle loop; renders to stdout and posts to Telegram
   env.ts                    zero-dependency .env loader (must be imported first)
   engine/rsi.ts             Wilder's RSI
-  types.ts                  MoversRow / MoversBoard, shared by both versions
-  mainnet/
-    config.ts               every mainnet constant, each verified live
-    rpc.ts                  JSON-RPC: timeout, retry, proactive range chunking
+  types.ts                  MoversRow / MoversBoard, shared by both workers
+  bsc/
+    config.ts               every BNB Chain constant, each verified live
+    anchors.ts              the anchor set, its kinds, and anchor→USD conversion
+    rpc.ts                  JSON-RPC: timeout, retry, range chunking, call batching
     decode.ts               ABI word/address helpers + v3 Swap decoder
     price.ts  candles.ts  rsi-tag.ts     price series → 5-min candles → RSI
     onchain-mcap.ts         supply/decimals reads + the FDV formula
-    eth-price.ts            ETH/USD from the USDC/WETH pool
+    bnb-price.ts            BNB/USD from the WBNB/USDT pool
     volume-history.ts       bucketed volume + the spike score boards rank on
     denylist.ts             established-token exclusion, by address
     mcap-select.ts          lazy market-cap walk → main / danger split
-    audit.ts                explorer verification + heuristic source scan
+    audit.ts                Etherscan V2 verification + heuristic source scan
     format.ts               stdout board rendering
-    v3/  swaps · metadata · state · worker
-    v4/  decode · swaps · metadata · state · worker
+    v3/        swaps · metadata · state · worker   (PancakeSwap v3)
+    infinity/  decode · swaps · metadata · state · worker   (PancakeSwap Infinity CL)
   telegram/
     format.ts               HTML boards with clickable explorer links
     sender.ts               Bot API sendMessage over fetch, no dependency
@@ -357,9 +451,9 @@ src/
     bot.ts                  long-poll loop; `npm run start:lp`
     auth.ts                 the whole authorisation surface, one pure function
     commands.ts             command routing and replies
-    config.ts               mainnet addresses, tick spacings, owner id
+    config.ts               BNB Chain addresses, tick spacings, owner id
     keeperhub.ts            MCP JSON-RPC client: reads, writes, execution history
-    uniswap.ts              tick maths, amounts, ABIs, unit conversion
+    pancake.ts              tick maths, amounts, ABIs, unit conversion
     plan.ts                 quote → simulate → execute, for both entry and exit
     pending.ts              single-use confirm codes, in memory on purpose
     audit.ts                token verification + source scan before you fund it
@@ -368,8 +462,8 @@ src/
 
 ## LP bot (`npm run lp-bot`)
 
-A second, independent process: a Telegram DM bot that opens **Uniswap v3 positions on
-Ethereum mainnet**, signing through KeeperHub. It shares nothing with the indexer but
+A second, independent process: a Telegram DM bot that opens **PancakeSwap v3 positions
+on BNB Chain**, signing through KeeperHub. It shares nothing with the indexer but
 the `.env` and the logger — the indexer never writes, and the bot never indexes.
 
 ```bash
@@ -417,7 +511,7 @@ Three quirks worth knowing, each commented at its call site:
   (`totalSupply` → `"9184992…"`). `readFields` and `readScalar` each assert the
   shape they expect rather than guessing.
 
-Worked end to end on mainnet — [the transactions](#proven-on-mainnet).
+Worked end to end against a real position — [the transactions](#proven-live--on-ethereum-before-the-bnb-chain-port).
 
 ### The audit trail comes from KeeperHub, not from memory
 
@@ -453,7 +547,7 @@ Two things the endpoint requires care with, both commented at the call site:
 
 `/lp` accepts a raw address anywhere a symbol goes, which means it will happily
 quote a position in a contract nobody has ever read. So the same explorer
-verification and heuristic source scan the boards use (`mainnet/audit.ts`) runs
+verification and heuristic source scan the boards use (`bsc/audit.ts`) runs
 on the pair first, and the verdict prints **above** the plan — in front of the
 decision rather than as a footnote to it:
 
@@ -470,8 +564,8 @@ rather than hide the token.
 **Only tokens outside the curated alias table are audited automatically**, and
 that is calibration rather than laziness. The scan was tuned against memecoin
 launches; on blue chips it fires on things that are normal for them. Checked
-live, USDC returns `✅🔴 upgradeable` — correct per the rules, and useless above
-every routine USDC/WETH quote, where it would train the reader to ignore the one
+live, USDT returns `✅🔴 upgradeable` — correct per the rules, and useless above
+every routine USDT/WBNB quote, where it would train the reader to ignore the one
 badge that matters. `/audit <token>` runs it on anything explicitly, majors
 included, and carries the caveat with it.
 
@@ -542,11 +636,11 @@ The gap between the current price and the near edge (`offsetPct`, default 1%) is
 cosmetic. With no gap, any price drift between quote and inclusion pulls the current
 tick inside the range, which makes the mint demand *both* tokens and revert.
 
-Economically a single-sided position is a **limit order**: WETH placed below the price
-in a USDC/WETH pool sells into USDC as ETH rises through the band.
+Economically a single-sided position is a **limit order**: WBNB placed below the price
+in a USDT/WBNB pool sells into USDT as BNB rises through the band.
 
-Wrapping is a separate step because raw ETH is not an ERC20 and cannot be deposited
-into a pool — `/wrap` calls WETH's payable `deposit()`.
+Wrapping is a separate step because raw BNB is not an ERC20 and cannot be deposited
+into a pool — `/wrap` calls WBNB's payable `deposit()`.
 
 ### Authorisation is by numeric id, never by username
 
@@ -589,7 +683,8 @@ idempotency key (`lp-<code>-<index>`), so a retry after a timeout cannot double-
   exactly this reason.
 - **Ticks are logarithmic.** A ±10% band is `ln(1.10)/ln(1.0001)` ≈ 953 ticks wide
   *wherever the pool currently sits*. Treating the percentage as linear in tick space
-  would be wildly wrong on mainnet USDC/WETH, which trades near tick 200,000. Both
+  would be wildly wrong on a pool far from tick 0 — a USDT/WBNB pool sits near tick
+  -66,000, and an 18-vs-6-decimal pair on another chain sits near +200,000. Both
   bounds are then aligned to the tier's `tickSpacing` — lower down, upper up — because
   an unaligned range reverts.
 
@@ -606,13 +701,25 @@ when the ABI outputs are named (`slot0` → `{ sqrtPriceX96, tick, … }`) but a
 scalar when they are not (`totalSupply` → `"9184992…"`). `readFields` and `readScalar`
 each assert the shape they expect rather than guessing.
 
-### Uniswap v3, not v4 — deliberately
+### PancakeSwap v3, not Infinity — deliberately
 
-v3's `mint` is a flat tuple on a well-known `NonfungiblePositionManager`. v4 LP goes
-through `PositionManager.modifyLiquidities`, which takes encoded action sequences plus
-Permit2 approvals — far harder to drive through a generic contract-call tool. Note this
-means the boards and the bot point at different protocols: the boards index v4, the bot
-LPs into v3.
+v3's `mint` is a flat tuple on a well-known `NonfungiblePositionManager`
+(`0x46A15B0b…4364`, confirmed by its `symbol()` answering `PCS-V3-POS`). Infinity LP
+goes through `CLPositionManager.modifyLiquidities`, which takes encoded action
+sequences plus Permit2 approvals — far harder to drive through a generic contract-call
+tool. So the boards index both protocols while the bot LPs into v3 only.
+
+**PancakeSwap's fee ladder is not Uniswap's**, and the table is load-bearing rather
+than informational — a tick range must be a multiple of its pool's spacing or `mint`
+reverts. The 0.3%/60 tier does not exist here:
+
+| fee | 100 | 500 | **2500** | 10000 |
+|---|---|---|---|---|
+| tickSpacing | 1 | 10 | **50** | 200 |
+
+Every pair was read back from a live pool's `fee()` and `tickSpacing()`. Carrying
+Uniswap's table over would have made `3000` a silently unsupported tier and mis-spaced
+any range quoted against it.
 
 ### Before it can execute
 
@@ -623,15 +730,22 @@ Three values, all in the gitignored `.env`, and none of them defaulted:
 3. `LP_WALLET_ADDRESS` — the address behind the KeeperHub wallet integration.
 
 Gas is **sponsored by KeeperHub**: executions route through a relayer, and the wallet's
-ETH balance falls only by the value actually sent, not by gas. So the wallet needs the
+BNB balance falls only by the value actually sent, not by gas. So the wallet needs the
 assets it intends to deposit, but not a gas float.
 
-### Proven on mainnet
+### Proven live — on Ethereum, before the BNB Chain port
 
-The path is not theoretical — this exact code opened a live position and later
-closed it, so the **round trip** is proven rather than just the entry. Every
-transaction below was signed by the bot through KeeperHub, and all six gas
-sponsored.
+The path is not theoretical: this code opened a live position and later closed it, so
+the **round trip** is proven rather than just the entry. Every transaction below was
+signed by the bot through KeeperHub, and all six gas sponsored.
+
+**These executions are on Ethereum mainnet against Uniswap v3**, because that is what
+the bot targeted when they ran, and they are left here unaltered as the provenance
+they are. What they prove carries over unchanged — the KeeperHub tuple encoding, the
+`decreaseLiquidity → collect → burn` ordering, the single-sided tick placement, and
+the wei-exactness trap below are all protocol mechanics, and PancakeSwap v3 is Uniswap
+v3's fee ladder bolted onto the same contracts. What they do **not** prove is the BNB
+Chain path end to end; that awaits a funded wallet on BSC.
 
 **Opening the position** — `/wrap 0.00035` then `/lp USDC WETH 500 0 0.00035`:
 
@@ -677,20 +791,32 @@ Two things the exit confirmed that only a live run could:
 
 ## Known limits
 
-- **RPC-call-bound.** Almost all cycle time is sequential `eth_call` latency at
-  ~330ms each on the free endpoint. JSON-RPC **batching** would collapse each pool's
-  `token0`/`token1`/`fee`/`getPool` into a single request and is the highest-value
-  optimisation available; it is not implemented here.
-- **The first cycle after a cold start is slow — around 6 minutes per version.**
-  With no cursor it clamps to the full `MAX_LOOKBACK_BLOCKS` window, which at a
-  10-block chunk cap is 30 sequential `eth_getLogs` calls over ~200 distinct pools.
-  Steady-state cycles sweep only the ~10 blocks since the last one and take well
-  under a minute. Attaching a volume keeps the cursor and caches across deploys, so
-  the cold start is paid once rather than on every release.
-- **The market-cap lookup ceiling is reached routinely.** A mainnet window holds
-  ~30 pools against a default `MOVERS_MCAP_MAX_LOOKUPS=25`, so the walk is often
-  cut short — which is logged, loudly, and means the board can be incomplete.
-- The v3 and v4 workers keep **independent block cursors**, so their windows are
-  adjacent rather than identical.
+- **The market-cap lookup ceiling is reached routinely.** A window here holds
+  200–280 pools against a default `MOVERS_MCAP_MAX_LOOKUPS=25`, so the walk is
+  almost always cut short — which is logged, loudly, and means a board can be
+  incomplete. This is a much tighter bind than on Ethereum, where a window held ~30
+  pools: the ceiling now stops the walk after roughly the top tenth of the ranking.
+  Raising it costs two sequential `eth_call`s per extra lookup, since the walk is
+  deliberately lazy and cannot be batched without pricing every token to find out
+  which ones mattered.
+- **Verification badges need an API key.** There is no Blockscout for BNB Chain, so
+  without `BSC_EXPLORER_API_KEY` the ✅/⚠️ and 🟢🟡🔴 badges are absent entirely
+  rather than degraded.
+- **The LP bot's BNB Chain path has not executed live.** Every address is verified
+  on-chain and the fee ladder is corrected, but the round trip in
+  [Proven live](#proven-live--on-ethereum-before-the-bnb-chain-port) ran on Ethereum
+  against Uniswap v3. The BSC path awaits a funded wallet.
+- **The v3 sweep depends on one of two endpoints.** Only `bsc.blockrazor.xyz` and
+  `1rpc.io/bnb` answer a topic-only `eth_getLogs` at all. If both are down the v3
+  board stops; the Infinity board, which filters on an address, is unaffected.
+- **Only Infinity's CL pools are indexed, not Bin.** `BinPoolManager` is deployed and
+  functional but returned **one** log in a 300-block sample against CLPoolManager's
+  4,341. It also uses a discrete-bin AMM rather than `sqrtPriceX96`, so none of the
+  pricing or candle code would apply to it.
+- The v3 and Infinity workers keep **independent block cursors**, so their windows
+  are adjacent rather than identical.
 - Swap counts are per-**pool**, not per-token: a token trading on two fee tiers
   occupies two rows. `mcap-select` guarantees both rows land on the same board.
+- **Volume history is capped at 500 pools** (LRU). A window routinely holds more than
+  half that, so on a busy chain the least recently active pools lose their baseline
+  and fall back to warm-up.

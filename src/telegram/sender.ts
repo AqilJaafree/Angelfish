@@ -1,6 +1,6 @@
 import { logger } from '../logger';
 import { MoversBoard } from '../types';
-import { formatDangerZoneBoard, formatMoversBoardV3, formatMoversBoardV4 } from './format';
+import { formatDangerZoneBoard, formatMoversBoardV3, formatMoversBoardCl } from './format';
 
 // The token is named TELEGRAM_BOT here (not TELEGRAM_BOT_TOKEN as in nautilus)
 // because that is the key already present in this project's .env.
@@ -9,7 +9,15 @@ const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 // Optional forum-topic thread ids. Unset => everything goes to the group's
 // General topic, which is the correct default for a plain (non-forum) chat.
 const V3_TOPIC_ID = process.env.V3_MOVERS_TOPIC_ID;
-const V4_TOPIC_ID = process.env.V4_MOVERS_TOPIC_ID;
+// V4_MOVERS_TOPIC_ID is read last for continuity with deployments configured before
+// the BNB Chain port: the board it routes is now PancakeSwap Infinity rather than
+// Uniswap v4, but it is the same Telegram topic, and dropping the old name would
+// silently reroute those boards to the group's General topic — a change that looks
+// like the bot quietly breaking rather than a renamed setting.
+const CL_TOPIC_ID =
+  process.env.INFINITY_MOVERS_TOPIC_ID ??
+  process.env.CL_MOVERS_TOPIC_ID ??
+  process.env.V4_MOVERS_TOPIC_ID;
 const DANGER_TOPIC_ID = process.env.DANGER_ZONE_TOPIC_ID;
 
 const API = 'https://api.telegram.org';
@@ -90,7 +98,7 @@ let warnedUnconfigured = false;
 // window next cycle — re-posting any board that had already succeeded.
 export async function sendBoard(
   board: MoversBoard,
-  version: 'v3' | 'v4'
+  version: 'v3' | 'cl'
 ): Promise<boolean> {
   if (!board.rows.length) return false;
   if (!isConfigured()) {
@@ -104,7 +112,7 @@ export async function sendBoard(
     return false;
   }
 
-  const versionTopic = version === 'v3' ? V3_TOPIC_ID : V4_TOPIC_ID;
+  const versionTopic = version === 'v3' ? V3_TOPIC_ID : CL_TOPIC_ID;
   const isDanger = board.variant === 'danger';
   // A Danger Zone board falls back to its OWN version's topic, not to the
   // chat's General topic. Both boards describe the same version's swaps, so
@@ -117,7 +125,7 @@ export async function sendBoard(
     ? formatDangerZoneBoard(board)
     : version === 'v3'
       ? formatMoversBoardV3(board)
-      : formatMoversBoardV4(board);
+      : formatMoversBoardCl(board);
 
   const sent = await sendMessage(text, topic);
   if (sent) {

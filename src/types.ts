@@ -12,17 +12,25 @@ export interface AuditResult {
   flags?: string[];
 }
 
-// One row of a Top Movers board. Shared by the v3 and v4 workers so a single
-// renderer serves both — `pool` holds a pool address on v3 and a bytes32 PoolId
-// on v4, which is the only shape difference between the two versions.
+// One row of a Top Movers board. Shared by the v3 and Infinity workers so a single
+// renderer serves both — `pool` holds a pool address on v3 and a bytes32 PoolId on
+// Infinity, which is the only shape difference between the two.
 export interface MoversRow {
-  pool: string; // v3: pool address (lowercase). v4: bytes32 PoolId.
-  token: string; // the non-ETH token address (lowercase)
+  pool: string; // v3: pool address (lowercase). Infinity: bytes32 PoolId.
+  token: string; // the non-anchor token address (lowercase)
   symbol: string; // resolved token symbol (or short-address fallback)
-  volumeWeth: bigint; // Σ |ETH-side amount| over the window, in wei
+  // Window volume and fees in USD, as bigints in 1e18 fixed point.
+  //
+  // USD rather than an amount of the anchor currency, because on BSC pools do not
+  // share one anchor: a row may be quoted in BNB, USDT, USDC or USD1 (see
+  // bsc/anchors.ts), so an anchor-denominated figure would be incomparable between
+  // two rows of the same board. `undefined` means the value could not be converted —
+  // only reachable for a BNB-anchored pool when the BNB/USD read failed — and
+  // renders as a dash rather than a zero.
+  volumeUsd?: bigint;
   swaps: number; // number of Swap events
   traders: number; // unique swapper addresses
-  feesWeth: bigint; // fees generated in the window, valued in wei
+  feesUsd?: bigint;
   verified?: boolean; // explorer contract verification (drives ✅ / ⚠️)
   risk?: RiskLevel; // heuristic audit risk light (drives 🟢/🟡/🔴/⬜)
   feeTier?: string; // pool fee tier for display, e.g. "0.3%" or "dynamic"
@@ -39,9 +47,9 @@ export interface MoversRow {
 }
 
 export interface MoversBoard {
-  rows: MoversRow[]; // sorted by volumeWeth desc
+  rows: MoversRow[]; // ranked by volume spike, then USD volume
   block: number; // toBlock of this window
   fromBlock: number;
   variant?: 'main' | 'danger';
-  label?: string; // origin label, e.g. "Uniswap v3 (ETH)"
+  label?: string; // origin label, e.g. "PancakeSwap v3 (BNB)"
 }

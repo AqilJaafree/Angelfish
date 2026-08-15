@@ -19,10 +19,10 @@ const rows: MoversRow[] = [
     pool: '0xtest1',
     token: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
     symbol: 'CLEAN',
-    volumeWeth: 12_400_000_000_000_000_000n,
+    volumeUsd: 12_400_000_000_000_000_000n,
     swaps: 88,
     traders: 41,
-    feesWeth: 37_000_000_000_000_000n,
+    feesUsd: 37_000_000_000_000_000n,
     feeTier: '0.3%',
     marketCapUsd: 1_200_000,
     verified: true,
@@ -33,10 +33,10 @@ const rows: MoversRow[] = [
     pool: '0xtest2',
     token: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
     symbol: 'RISKY',
-    volumeWeth: 5_500_000_000_000_000_000n,
+    volumeUsd: 5_500_000_000_000_000_000n,
     swaps: 30,
     traders: 12,
-    feesWeth: 16_000_000_000_000_000n,
+    feesUsd: 16_000_000_000_000_000n,
     feeTier: 'dynamic',
     marketCapUsd: 49_800_000_000,
     verified: true,
@@ -49,10 +49,10 @@ const rows: MoversRow[] = [
     pool: '0xtest3',
     token: '0xdac17f958d2ee523a2206206994597c13d831ec7',
     symbol: '<b>NOT_BOLD</b> & co',
-    volumeWeth: 900_000_000_000_000_000n,
+    volumeUsd: 900_000_000_000_000_000n,
     swaps: 7,
     traders: 5,
-    feesWeth: 2_700_000_000_000_000n,
+    feesUsd: 2_700_000_000_000_000n,
     feeTier: '1%',
     marketCapUsd: undefined, // unknown cap -> "MC —"
     verified: false,
@@ -65,10 +65,10 @@ const rows: MoversRow[] = [
     pool: '0xtest4',
     token: '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599',
     symbol: 'NOBADGE',
-    volumeWeth: 40_000_000_000_000_000n,
+    volumeUsd: 40_000_000_000_000_000n,
     swaps: 1,
     traders: 1,
-    feesWeth: 120_000_000_000n,
+    feesUsd: 120_000_000_000n,
     feeTier: '0.05%',
     marketCapUsd: 0.4, // sub-dollar -> "MC <$1"
   },
@@ -99,7 +99,7 @@ async function main(): Promise<void> {
       variant: 'danger',
       label: 'Uniswap v4 (ETH) — TEST',
     },
-    'v4'
+    'cl'
   );
   console.log('danger board:', danger ? 'sent' : 'FAILED');
 

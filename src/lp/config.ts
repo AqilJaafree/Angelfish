@@ -1,28 +1,42 @@
-// Ethereum mainnet Uniswap v3 constants for the LP bot. Mainnet only, by design:
+// BNB Chain PancakeSwap v3 constants for the LP bot. One chain only, by design:
 // the bot signs transactions, so the chain is pinned rather than parameterised.
-export const CHAIN_ID = '1';
+export const CHAIN_ID = '56';
 
 // NonfungiblePositionManager — mint/increase/decrease/collect all live here.
-export const POSITION_MANAGER = '0xC36442b4a4522E871399CD717aBDD847Ab11FE88';
-export const V3_FACTORY = '0x1f98431c8ad98523631ae4a59f267346ea31f984';
+// Verified on-chain by its symbol(), which answers `PCS-V3-POS`.
+export const POSITION_MANAGER = '0x46A15B0b27311cedF172AB29E4f4766fbE7F4364';
+export const V3_FACTORY = '0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865';
 
 // Fee tier -> tickSpacing. A tick range MUST be a multiple of the pool's spacing
 // or mint reverts, so this table is load-bearing rather than informational.
+//
+// PANCAKESWAP'S LADDER IS NOT UNISWAP'S. The 0.3%/60 tier does not exist here; its
+// place is taken by 0.25%/50. Every pair was read back from a live pool's fee() and
+// tickSpacing() on 2026-08-15 rather than assumed. Carrying Uniswap's table over
+// would have made `3000` a silently unsupported tier and — worse — mis-spaced any
+// range quoted against it.
 export const TICK_SPACING: Record<number, number> = {
   100: 1,
   500: 10,
-  3000: 60,
+  2500: 50,
   10000: 200,
 };
 
-// Symbol aliases accepted in commands, so `/lp USDC WETH 500 …` works without
+// Symbol aliases accepted in commands, so `/lp USDT WBNB 500 …` works without
 // pasting addresses. An address is always accepted too and always wins.
+//
+// Note the decimals: on BSC the stablecoins are 18, not the 6 they are on Ethereum,
+// and BTCB is 18 rather than WBTC's 8. toBaseUnits rejects an amount with more
+// decimal places than the token has, so a stale 6 here would refuse valid amounts.
 export const TOKENS: Record<string, { address: string; decimals: number }> = {
-  WETH: { address: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', decimals: 18 },
-  USDC: { address: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', decimals: 6 },
-  USDT: { address: '0xdac17f958d2ee523a2206206994597c13d831ec7', decimals: 6 },
-  DAI: { address: '0x6b175474e89094c44da98b954eedeac495271d0f', decimals: 18 },
-  WBTC: { address: '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599', decimals: 8 },
+  WBNB: { address: '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c', decimals: 18 },
+  USDT: { address: '0x55d398326f99059ff775485246999027b3197955', decimals: 18 },
+  USDC: { address: '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d', decimals: 18 },
+  USD1: { address: '0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d', decimals: 18 },
+  BUSD: { address: '0xe9e7cea3dedca5984780bafc599bd69add087d56', decimals: 18 },
+  BTCB: { address: '0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c', decimals: 18 },
+  ETH: { address: '0x2170ed0880ac9a755fd29b2688956bd959f933f8', decimals: 18 },
+  CAKE: { address: '0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82', decimals: 18 },
 };
 
 // Only this Telegram user may command the bot. A NUMERIC id, never a username:

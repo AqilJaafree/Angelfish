@@ -2,7 +2,7 @@
   "name": "angelfish",
   "version": "0.1.0",
   "private": true,
-  "description": "Uniswap v3 + v4 ETH-pair swap indexer for Ethereum mainnet",
+  "description": "PancakeSwap v3 + Infinity anchored-pair swap indexer for BNB Chain",
   "engines": {
     "node": ">=20.0.0"
   },

@@ -6,7 +6,7 @@ import {
   NPM_ABI, SLOT0_ABI, TokenRef, ZERO_ADDRESS,
   applySlippage, buildMintParams, fromBaseUnits, knownToken, positionAmounts, priceFromSqrt,
   rangeTicks, singleSidedTicks, sortTokens, toBaseUnits,
-} from './uniswap';
+} from './pancake';
 
 export interface PlanStep {
   label: string;
@@ -43,7 +43,7 @@ export async function resolvePool(
   const poolRes = await kh.readFields(V3_FACTORY, 'getPool', [token0.address, token1.address, fee], GET_POOL_ABI);
   const pool = poolRes.pool;
   if (!pool || pool.toLowerCase() === ZERO_ADDRESS) {
-    throw new Error(`no Uniswap v3 pool for ${token0.symbol}/${token1.symbol} at fee ${fee}`);
+    throw new Error(`no PancakeSwap v3 pool for ${token0.symbol}/${token1.symbol} at fee ${fee}`);
   }
   const slot0 = await kh.readFields(pool, 'slot0', [], SLOT0_ABI);
   return {
@@ -164,7 +164,7 @@ export interface PositionSnapshot {
 }
 
 // Read a position and resolve both of its tokens. `knownToken` short-circuits
-// the alias table so a USDC/WETH position costs no decimals()/symbol() reads.
+// the alias table so a USDT/WBNB position costs no decimals()/symbol() reads.
 export async function readPosition(tokenId: string): Promise<PositionSnapshot> {
   const p = await kh.readFields(POSITION_MANAGER, 'positions', [tokenId], NPM_ABI);
   const asRef = (address: string): TokenRef => {
