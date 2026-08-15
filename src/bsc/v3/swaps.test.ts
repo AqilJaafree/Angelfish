@@ -66,6 +66,13 @@ describe('aggregateSwaps', () => {
     expect(agg.get(POOL)!.lastBlock).toBe(9);
   });
 
+  // The board split is by quote currency, so the anchor ADDRESS — not just its
+  // kind — has to survive aggregation and ranking.
+  it('carries the anchor address through to the aggregate', () => {
+    const agg = aggregateSwaps([{ pool: POOL, swap: swap(1n, -1n) }], meta(true));
+    expect(agg.get(POOL)!.anchor).toBe(ANCHOR);
+  });
+
   it('reads the anchor leg from amount1 when the anchor is token1', () => {
     const agg = aggregateSwaps([{ pool: POOL, swap: swap(999n, -7n) }], meta(false));
     expect(agg.get(POOL)!.volumeAnchor).toBe(7n);
@@ -98,6 +105,7 @@ describe('rankTopN', () => {
     const mk = (pool: string, v: bigint): PoolAggregate => ({
       pool,
       token: TOKEN,
+      anchor: ANCHOR,
       anchorKind: 'usd',
       volumeAnchor: v,
       swaps: 1,

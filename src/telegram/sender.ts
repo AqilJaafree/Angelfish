@@ -1,4 +1,5 @@
 import { logger } from '../logger';
+import { BoardKey } from '../bsc/anchors';
 import { MoversBoard } from '../types';
 import { formatDangerZoneBoard, formatMoversBoardV3, formatMoversBoardCl } from './format';
 
@@ -6,18 +7,45 @@ import { formatDangerZoneBoard, formatMoversBoardV3, formatMoversBoardCl } from 
 // because that is the key already present in this project's .env.
 const BOT_TOKEN = process.env.TELEGRAM_BOT ?? process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-// Optional forum-topic thread ids. Unset => everything goes to the group's
-// General topic, which is the correct default for a plain (non-forum) chat.
-const V3_TOPIC_ID = process.env.V3_MOVERS_TOPIC_ID;
-// V4_MOVERS_TOPIC_ID is read last for continuity with deployments configured before
-// the BNB Chain port: the board it routes is now PancakeSwap Infinity rather than
-// Uniswap v4, but it is the same Telegram topic, and dropping the old name would
-// silently reroute those boards to the group's General topic — a change that looks
-// like the bot quietly breaking rather than a renamed setting.
-const CL_TOPIC_ID =
-  process.env.INFINITY_MOVERS_TOPIC_ID ??
-  process.env.CL_MOVERS_TOPIC_ID ??
-  process.env.V4_MOVERS_TOPIC_ID;
+// Which board goes to which forum topic. Both topics now carry PancakeSwap v3,
+// split by the currency the pair is quoted in rather than by DEX version.
+//
+// The OLD names are the fallbacks on purpose. V3_MOVERS_TOPIC_ID kept its meaning
+// (it routed the v3 board, and the WBNB board is the v3 board minus its
+// stable-quoted pools), and V4_MOVERS_TOPIC_ID now routes the USDT board — the
+// topic that used to hold Infinity. Reading them means an existing deployment
+// needs no variable changes to land on the intended topics; requiring new names
+// would silently reroute both boards to the group's General topic, which looks
+// like the bot breaking rather than like a renamed setting.
+//
+// An unset value is not an error: everything then goes to General, which is the
+// correct default for a plain (non-forum) chat.
+export type BoardTarget = BoardKey | 'infinity';
+
+// Pure and env-injectable so the fallback chain is testable: it is read once at
+// module scope, and getting it wrong does not throw — it quietly posts to General.
+export function boardTopics(
+  env: NodeJS.ProcessEnv = process.env
+): Record<BoardTarget, string | undefined> {
+  return {
+    wbnb: env.V3_WBNB_MOVERS_TOPIC_ID ?? env.V3_MOVERS_TOPIC_ID,
+    usdt: env.V3_USDT_MOVERS_TOPIC_ID ?? env.V4_MOVERS_TOPIC_ID,
+    // Infinity has no legacy fallback: both of the topics it could have inherited
+    // now belong to a v3 board, so defaulting it to either would put two different
+    // boards in one topic. Unset also means the worker does not run — see index.ts.
+    infinity: env.INFINITY_MOVERS_TOPIC_ID ?? env.CL_MOVERS_TOPIC_ID,
+  };
+}
+
+const TOPIC_BY_BOARD = boardTopics();
+
+// Whether a board has somewhere of its own to go. Used to decide whether to RUN
+// the Infinity cycle at all: an unrouted board would otherwise spend a full sweep
+// and hundreds of eth_calls to produce rows nobody asked for.
+export function isBoardRouted(target: BoardTarget): boolean {
+  return Boolean(TOPIC_BY_BOARD[target]);
+}
+
 const DANGER_TOPIC_ID = process.env.DANGER_ZONE_TOPIC_ID;
 
 const API = 'https://api.telegram.org';
@@ -193,7 +221,7 @@ let warnedUnconfigured = false;
 // window next cycle — re-posting any board that had already succeeded.
 export async function sendBoard(
   board: MoversBoard,
-  version: 'v3' | 'cl'
+  target: BoardTarget
 ): Promise<boolean> {
   if (!board.rows.length) return false;
   if (!isConfigured()) {
@@ -207,25 +235,25 @@ export async function sendBoard(
     return false;
   }
 
-  const versionTopic = version === 'v3' ? V3_TOPIC_ID : CL_TOPIC_ID;
+  const boardTopic = TOPIC_BY_BOARD[target];
   const isDanger = board.variant === 'danger';
-  // A Danger Zone board falls back to its OWN version's topic, not to the
-  // chat's General topic. Both boards describe the same version's swaps, so
-  // splitting them across a configured topic and General would scatter one
-  // version's data over two places — and General is where a forum puts
-  // everything nobody routed, which is the wrong home for a routed board.
-  // Set DANGER_ZONE_TOPIC_ID to collect both versions' danger rows in one topic.
-  const topic = isDanger ? (DANGER_TOPIC_ID ?? versionTopic) : versionTopic;
+  // A Danger Zone board falls back to its OWN board's topic, not to the chat's
+  // General topic. Both describe the same pools' swaps, so splitting them across a
+  // configured topic and General would scatter one board's data over two places —
+  // and General is where a forum puts everything nobody routed, which is the wrong
+  // home for a routed board. Set DANGER_ZONE_TOPIC_ID to collect every board's
+  // danger rows in one topic instead.
+  const topic = isDanger ? (DANGER_TOPIC_ID ?? boardTopic) : boardTopic;
   const text = isDanger
     ? formatDangerZoneBoard(board)
-    : version === 'v3'
-      ? formatMoversBoardV3(board)
-      : formatMoversBoardCl(board);
+    : target === 'infinity'
+      ? formatMoversBoardCl(board)
+      : formatMoversBoardV3(board, target);
 
   const sent = await sendMessage(text, topic);
   if (sent) {
     logger.info(
-      { version, variant: board.variant ?? 'main', topic, rows: board.rows.length, block: board.block },
+      { board: target, variant: board.variant ?? 'main', topic, rows: board.rows.length, block: board.block },
       'telegram: board sent'
     );
   }

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  boardTopics,
   clearMute,
   isMuted,
   MAX_INLINE_WAIT_MS,
@@ -160,5 +161,52 @@ describe('mute probing', () => {
     const afterInterval = Date.now() + PROBE_INTERVAL_MS + 1000;
     expect(isMuted(afterInterval)).toBe(false);
     expect(muteRemainingMs(afterInterval)).toBeGreaterThan(0);
+  });
+});
+
+// Both topics carry PancakeSwap v3 now, split by quote currency. The mapping is
+// read once at module scope and a wrong answer does not throw — it silently posts
+// to the group's General topic, which reads as the bot breaking rather than as a
+// misconfiguration. So the fallback chain is pinned here.
+describe('boardTopics', () => {
+  it('routes each v3 board to its own topic', () => {
+    const t = boardTopics({ V3_WBNB_MOVERS_TOPIC_ID: '2', V3_USDT_MOVERS_TOPIC_ID: '4' });
+    expect(t.wbnb).toBe('2');
+    expect(t.usdt).toBe('4');
+  });
+
+  // THE regression this exists for: a deployment configured before the split must
+  // land on the same two topics without being edited. V3_MOVERS_TOPIC_ID routed the
+  // single v3 board (now the WBNB one) and V4_MOVERS_TOPIC_ID routed Infinity (now
+  // the USDT one).
+  it('honours the pre-split names so an existing deployment needs no edit', () => {
+    const t = boardTopics({ V3_MOVERS_TOPIC_ID: '2', V4_MOVERS_TOPIC_ID: '4' });
+    expect(t.wbnb).toBe('2');
+    expect(t.usdt).toBe('4');
+  });
+
+  it('prefers the explicit name over the legacy one', () => {
+    const t = boardTopics({
+      V3_MOVERS_TOPIC_ID: '2',
+      V3_WBNB_MOVERS_TOPIC_ID: '7',
+      V4_MOVERS_TOPIC_ID: '4',
+      V3_USDT_MOVERS_TOPIC_ID: '9',
+    });
+    expect(t.wbnb).toBe('7');
+    expect(t.usdt).toBe('9');
+  });
+
+  // Infinity gets no legacy fallback: inheriting either topic would put two
+  // different boards in the same one.
+  it('leaves Infinity unrouted unless a topic is named for it', () => {
+    expect(boardTopics({ V3_MOVERS_TOPIC_ID: '2', V4_MOVERS_TOPIC_ID: '4' }).infinity)
+      .toBeUndefined();
+    expect(boardTopics({ INFINITY_MOVERS_TOPIC_ID: '6' }).infinity).toBe('6');
+    expect(boardTopics({ CL_MOVERS_TOPIC_ID: '6' }).infinity).toBe('6');
+  });
+
+  it('leaves every board unrouted in a plain chat, so all boards go to General', () => {
+    const t = boardTopics({});
+    expect([t.wbnb, t.usdt, t.infinity]).toEqual([undefined, undefined, undefined]);
   });
 });

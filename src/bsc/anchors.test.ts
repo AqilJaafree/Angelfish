@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { anchorSide, isAnchor, toUsd } from './anchors';
+import { anchorSide, boardForAnchor, BOARDS, isAnchor, toUsd } from './anchors';
 import { NATIVE_BNB, USD1, USDC, USDT, WBNB } from './config';
 
 const TOKEN = '0x1111111111111111111111111111111111111111';
@@ -16,6 +16,30 @@ describe('isAnchor', () => {
 
   it('is case-insensitive, so a checksummed address cannot slip through', () => {
     expect(isAnchor('0xbB4CDb9CBd36B01bD1cBaEBF2De08d9173bc095c')).toBe(true);
+  });
+});
+
+describe('boardForAnchor', () => {
+  it('routes BNB-quoted pools to the WBNB board and USDT-quoted ones to the USDT board', () => {
+    expect(boardForAnchor(WBNB)).toBe('wbnb');
+    expect(boardForAnchor(NATIVE_BNB)).toBe('wbnb');
+    expect(boardForAnchor(USDT)).toBe('usdt');
+  });
+
+  // The narrowing that makes the USDT header honest: USDC and USD1 remain anchors
+  // (so a USDC/WBNB pool is still rejected as having no subject token) but a pool
+  // quoted in them is not a USDT pair and must not be printed as one.
+  it('leaves USDC- and USD1-quoted pools off both boards', () => {
+    expect(boardForAnchor(USDC)).toBeUndefined();
+    expect(boardForAnchor(USD1)).toBeUndefined();
+  });
+
+  it('is case-insensitive, so a checksummed anchor still routes', () => {
+    expect(boardForAnchor('0xbB4CDb9CBd36B01bD1cBaEBF2De08d9173bc095c')).toBe('wbnb');
+  });
+
+  it('exposes exactly one board per routed key', () => {
+    expect(BOARDS.map((b) => b.key)).toEqual(['wbnb', 'usdt']);
   });
 });
 

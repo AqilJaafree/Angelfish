@@ -1,4 +1,5 @@
 import { MoversBoard, MoversRow, RiskLevel } from '../types';
+import { BoardKey } from '../bsc/anchors';
 import { EXPLORER_BASE } from '../bsc/config';
 
 // Telegram's hard limit on a single sendMessage body.
@@ -131,8 +132,20 @@ function frame(title: string, board: MoversBoard): string {
   return [title, `<i>${span}</i>`, '', '<i>(board too large to render)</i>'].join('\n');
 }
 
-export function formatMoversBoardV3(board: MoversBoard): string {
-  return frame('🥞 <b>PancakeSwap v3 — Top Movers</b>', board);
+// Both v3 boards share a renderer and differ only in the header, because the ROWS
+// cannot tell you which board you are looking at: a row shows a symbol, an address
+// and USD figures, never the currency the pair is quoted in. The header is the only
+// place that information exists, so it is not decoration.
+const V3_PAIR_LABEL: Record<BoardKey, string> = {
+  wbnb: 'WBNB pairs',
+  usdt: 'USDT pairs',
+};
+
+export function formatMoversBoardV3(board: MoversBoard, pair: BoardKey): string {
+  return frame(
+    `🥞 <b>PancakeSwap v3 — Top Movers</b> · <i>${V3_PAIR_LABEL[pair]}</i>`,
+    board
+  );
 }
 
 export function formatMoversBoardCl(board: MoversBoard): string {

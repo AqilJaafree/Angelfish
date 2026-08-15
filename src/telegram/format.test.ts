@@ -9,7 +9,7 @@ import {
   htmlEscape,
   TELEGRAM_MAX_LEN,
 } from './format';
-import { MoversRow } from '../types';
+import { MoversBoard, MoversRow } from '../types';
 
 const row: MoversRow = {
   pool: '0xpool',
@@ -27,6 +27,10 @@ const row: MoversRow = {
 
 const board = { rows: [row], block: 25_740_390, fromBlock: 25_740_385 };
 
+// Most of these assertions are about the row renderer, which both v3 boards share.
+// Pin the pair so they read as "a v3 board" rather than "the WBNB one".
+const v3Board = (b: MoversBoard): string => formatMoversBoardV3(b, 'wbnb');
+
 describe('htmlEscape', () => {
   // Token symbols are attacker-controlled strings read off-chain. Unescaped, one
   // stray `<` makes Telegram reject the whole message and the board never posts.
@@ -36,7 +40,7 @@ describe('htmlEscape', () => {
   });
 
   it('escapes the symbol inside a rendered board', () => {
-    const out = formatMoversBoardV3({ ...board, rows: [{ ...row, symbol: '<i>x</i>' }] });
+    const out = v3Board({ ...board, rows: [{ ...row, symbol: '<i>x</i>' }] });
     expect(out).toContain('&lt;i&gt;x&lt;/i&gt;');
     expect(out).not.toContain('<i>x</i>');
   });
@@ -112,7 +116,7 @@ describe('rendered boards are valid Telegram HTML', () => {
   };
 
   it('holds for every board variant, including the rare branches', () => {
-    assertWellFormed(formatMoversBoardV3({ ...board, rows: [row, hostile] }));
+    assertWellFormed(v3Board({ ...board, rows: [row, hostile] }));
     assertWellFormed(formatMoversBoardCl({ ...board, rows: [hostile] }));
     assertWellFormed(
       formatDangerZoneBoard({ ...board, rows: [hostile], label: '<b>evil</b> label' })
@@ -129,7 +133,7 @@ describe('rendered boards are valid Telegram HTML', () => {
       traders: 0,
       feesUsd: 0n,
     };
-    assertWellFormed(formatMoversBoardV3({ ...board, rows: [bare] }));
+    assertWellFormed(v3Board({ ...board, rows: [bare] }));
   });
 });
 
@@ -147,15 +151,15 @@ describe('auditBadge', () => {
 
 describe('spike rendering', () => {
   it('shows the multiple the board ranks on', () => {
-    expect(formatMoversBoardV3({ ...board, rows: [{ ...row, spike: 22.4 }] })).toContain('22×');
-    expect(formatMoversBoardV3({ ...board, rows: [{ ...row, spike: 3.25 }] })).toContain('3.3×');
-    expect(formatMoversBoardV3({ ...board, rows: [{ ...row, spike: 999 }] })).toContain('999×');
+    expect(v3Board({ ...board, rows: [{ ...row, spike: 22.4 }] })).toContain('22×');
+    expect(v3Board({ ...board, rows: [{ ...row, spike: 3.25 }] })).toContain('3.3×');
+    expect(v3Board({ ...board, rows: [{ ...row, spike: 999 }] })).toContain('999×');
   });
 
   // "1.0×" would assert the pool is flat; the truth during warm-up is that
   // nothing is known about it yet. Those are different claims.
   it('marks a warming-up pool distinctly from a flat one', () => {
-    const warming = formatMoversBoardV3({ ...board, rows: [row] });
+    const warming = v3Board({ ...board, rows: [row] });
     expect(warming).toContain('⏳');
     expect(warming).not.toContain('1.0×');
   });
@@ -163,7 +167,7 @@ describe('spike rendering', () => {
 
 describe('board rendering', () => {
   it('renders an HTML row with a clickable token link', () => {
-    const out = formatMoversBoardV3(board);
+    const out = v3Board(board);
     expect(out).toContain('<b>TEST</b>');
     expect(out).toContain('✅🟢');
     expect(out).toContain('(0.25%)');
@@ -174,15 +178,28 @@ describe('board rendering', () => {
   });
 
   it('labels each version and the danger board\'s origin', () => {
-    expect(formatMoversBoardV3(board)).toContain('PancakeSwap v3');
+    expect(v3Board(board)).toContain('PancakeSwap v3');
     expect(formatMoversBoardCl(board)).toContain('PancakeSwap Infinity');
     const danger = formatDangerZoneBoard({ ...board, label: 'PancakeSwap Infinity (BNB)' });
     expect(danger).toContain('Danger Zone');
     expect(danger).toContain('PancakeSwap Infinity (BNB)');
   });
 
+  // The rows carry no quote currency at all — symbol, address and USD figures are
+  // identical in shape on both boards — so the header is the ONLY thing telling a
+  // reader which of the two topics they are looking at.
+  it('names the quote currency, the one thing the rows never show', () => {
+    const wbnb = formatMoversBoardV3(board, 'wbnb');
+    const usdt = formatMoversBoardV3(board, 'usdt');
+    expect(wbnb).toContain('WBNB pairs');
+    expect(usdt).toContain('USDT pairs');
+    expect(wbnb).not.toContain('USDT');
+    expect(wbnb).toContain('PancakeSwap v3');
+    expect(usdt).toContain('PancakeSwap v3');
+  });
+
   it('collapses the span when the window is a single block', () => {
-    expect(formatMoversBoardV3({ ...board, fromBlock: board.block })).toContain(
+    expect(v3Board({ ...board, fromBlock: board.block })).toContain(
       'block 25,740,390'
     );
   });
@@ -194,7 +211,7 @@ describe('board rendering', () => {
       ...row,
       symbol: `TOKEN${i}`.repeat(12),
     }));
-    const out = formatMoversBoardV3({ ...board, rows: many });
+    const out = v3Board({ ...board, rows: many });
     expect(out.length).toBeLessThanOrEqual(TELEGRAM_MAX_LEN);
     // Whatever survived is still well-formed markup, not a severed tag.
     expect((out.match(/<b>/g) ?? []).length).toBe((out.match(/<\/b>/g) ?? []).length);

@@ -23,7 +23,7 @@ import {
   WBNB,
   BSC_LOG_RPC_URL,
 } from '../config';
-import { toUsd } from '../anchors';
+import { BoardKey, BOARDS, boardForAnchor, toUsd } from '../anchors';
 import { sqrtPriceToSeriesValue } from '../price';
 import { recordSwapPrice } from '../candles';
 import { recordVolume, spikeScore, sortBySpike } from '../volume-history';
@@ -60,9 +60,21 @@ async function resolveSymbol(token: string): Promise<string> {
 // previous cycle finished; they share module-level `state`).
 let cycleRunning = false;
 
-export interface CycleResult {
+// One published board's worth of rows. A cycle produces one of these per entry in
+// BOARDS — WBNB pairs and USDT pairs — from a SINGLE sweep of the window. Running
+// two workers instead would double the topic-only getLogs storm (12 chunked
+// requests at the 25-block cap) to re-read blocks already in hand, so the sweep,
+// the metadata resolution and the candle/volume recording all stay shared and only
+// the ranking downstream of them is split.
+export interface BoardResult {
+  key: BoardKey;
+  label: string;
   main: MoversRow[];
   danger: MoversRow[];
+}
+
+export interface CycleResult {
+  boards: BoardResult[];
   fromBlock: number;
   toBlock: number;
 }
@@ -156,7 +168,7 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
       state.lastProcessedBlock = currentBlock;
       saveState(stateFile, state);
       logger.info({ fromBlock, currentBlock }, 'movers-v3: no anchored swaps in window');
-      return { main: [], danger: [], fromBlock, toBlock: currentBlock };
+      return { boards: [], fromBlock, toBlock: currentBlock };
     }
 
     // Record a 5-min candle sample and a volume sample for EVERY pool that traded
@@ -229,45 +241,60 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
       state.lastProcessedBlock = currentBlock;
       saveState(stateFile, state);
       logger.info({ dropped, fromBlock, currentBlock }, 'movers-v3: only established tokens traded');
-      return { main: [], danger: [], fromBlock, toBlock: currentBlock };
-    }
-    const selection = await selectByMarketCap(
-      ranked,
-      async (row) => {
-        const agg = aggregates.get(row.pool);
-        const meta = metaByPool.get(row.pool);
-        if (!agg || !meta) return undefined;
-        // A stable-anchored pool prices its token in USD directly, so it needs no
-        // rate at all; only a BNB-anchored one depends on the read above.
-        const anchorUsd = meta.anchorKind === 'usd' ? 1 : bnbUsd;
-        if (anchorUsd == null) return undefined;
-        const tm = await resolveTokenMeta(
-          row.token,
-          state.supplies,
-          state.suppliesCheckedAt,
-          rpc.callMany
-        );
-        if (!tm) return undefined;
-        return computeFdvUsd({
-          supply: tm.supply,
-          tokenDecimals: tm.decimals,
-          sqrtPriceX96: agg.lastSqrtPriceX96,
-          tokenIsToken0: !meta.anchorIsToken0,
-          anchorDecimals: ANCHOR_DECIMALS,
-          anchorUsd,
-        });
-      },
-      { minUsd: MIN_MARKET_CAP_USD, perGroup: TOP_N, maxLookups: MCAP_MAX_LOOKUPS }
-    );
-    if (selection.capped) {
-      logger.warn(
-        { lookups: selection.lookups, main: selection.main.length, danger: selection.danger.length },
-        'movers-v3: market-cap lookup ceiling reached, board may be incomplete'
-      );
+      return { boards: [], fromBlock, toBlock: currentBlock };
     }
 
+    // 5b. Split the ranking by quote currency — one list per board.
+    //
+    // The split happens HERE, after ranking and before the market-cap walk, and
+    // both sides of that matter. Ranking first keeps each board's spike order
+    // computed against the same window; splitting before the walk gives each board
+    // its own TOP_N and its own lookup budget, so a quiet WBNB window cannot be
+    // starved by a busy USDT one that spent the ceiling first.
+    const byBoard = new Map<BoardKey, typeof ranked>();
+    let unrouted = 0;
+    for (const row of ranked) {
+      const key = boardForAnchor(row.anchor);
+      if (!key) {
+        unrouted++; // quoted in USDC or USD1 — indexed, but on neither board
+        continue;
+      }
+      const list = byBoard.get(key);
+      if (list) list.push(row);
+      else byBoard.set(key, [row]);
+    }
+    if (unrouted) {
+      logger.debug({ unrouted }, 'movers-v3: pools on a non-board anchor (USDC/USD1)');
+    }
+
+    const resolveMarketCap = async (row: (typeof ranked)[number]): Promise<number | undefined> => {
+      const agg = aggregates.get(row.pool);
+      const meta = metaByPool.get(row.pool);
+      if (!agg || !meta) return undefined;
+      // A stable-anchored pool prices its token in USD directly, so it needs no
+      // rate at all; only a BNB-anchored one depends on the read above.
+      const anchorUsd = meta.anchorKind === 'usd' ? 1 : bnbUsd;
+      if (anchorUsd == null) return undefined;
+      const tm = await resolveTokenMeta(
+        row.token,
+        state.supplies,
+        state.suppliesCheckedAt,
+        rpc.callMany
+      );
+      if (!tm) return undefined;
+      return computeFdvUsd({
+        supply: tm.supply,
+        tokenDecimals: tm.decimals,
+        sqrtPriceX96: agg.lastSqrtPriceX96,
+        tokenIsToken0: !meta.anchorIsToken0,
+        anchorDecimals: ANCHOR_DECIMALS,
+        anchorUsd,
+      });
+    };
+
     // 6. Value fees (slot0) + resolve symbols — only for rows that made a board.
-    const buildRows = async (picked: typeof selection.main): Promise<MoversRow[]> => {
+    type Picked = Array<(typeof ranked)[number] & { marketCapUsd?: number }>;
+    const buildRows = async (picked: Picked): Promise<MoversRow[]> => {
       const out: MoversRow[] = [];
       for (const r of picked) {
         const meta = metaByPool.get(r.pool)!;
@@ -303,23 +330,51 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
       }
       return out;
     };
-    const main = await buildRows(selection.main);
-    const danger = await buildRows(selection.danger);
+    // 7. One market-cap walk and one row build per board, in BOARDS order.
+    const boards: BoardResult[] = [];
+    let lookups = 0;
+    for (const { key, label } of BOARDS) {
+      const rows = byBoard.get(key);
+      if (!rows?.length) continue;
+      const selection = await selectByMarketCap(rows, resolveMarketCap, {
+        minUsd: MIN_MARKET_CAP_USD,
+        perGroup: TOP_N,
+        maxLookups: MCAP_MAX_LOOKUPS,
+      });
+      lookups += selection.lookups;
+      if (selection.capped) {
+        logger.warn(
+          {
+            board: key,
+            lookups: selection.lookups,
+            main: selection.main.length,
+            danger: selection.danger.length,
+          },
+          'movers-v3: market-cap lookup ceiling reached, board may be incomplete'
+        );
+      }
+      boards.push({
+        key,
+        label,
+        main: await buildRows(selection.main),
+        danger: await buildRows(selection.danger),
+      });
+    }
 
     state.lastProcessedBlock = currentBlock;
     saveState(stateFile, state);
     logger.info(
       {
-        main: main.length,
-        danger: danger.length,
+        boards: boards.map((b) => ({ board: b.key, main: b.main.length, danger: b.danger.length })),
         pools: aggregates.size,
-        lookups: selection.lookups,
+        unrouted,
+        lookups,
         fromBlock,
         currentBlock,
       },
       'movers-v3: cycle complete'
     );
-    return { main, danger, fromBlock, toBlock: currentBlock };
+    return { boards, fromBlock, toBlock: currentBlock };
   } catch (err) {
     logger.error({ err }, 'movers-v3: cycle error');
     return undefined;

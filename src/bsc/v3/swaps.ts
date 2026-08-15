@@ -13,6 +13,7 @@ export interface PoolMeta {
 export interface PoolAggregate {
   pool: string;
   token: string;
+  anchor: string; // the anchor currency's address — decides which board this lands on
   anchorKind: AnchorKind;
   volumeAnchor: bigint; // Σ |anchor-side amount| over the window, in anchor base units
   swaps: number;
@@ -40,6 +41,7 @@ export function aggregateSwaps(
       agg = {
         pool,
         token: meta.token,
+        anchor: meta.anchor,
         anchorKind: meta.anchorKind,
         volumeAnchor: 0n,
         swaps: 0,
@@ -89,6 +91,7 @@ export function feesToAnchor(
 export interface RankedPool {
   pool: string;
   token: string;
+  anchor: string;
   anchorKind: AnchorKind;
   volumeAnchor: bigint;
   swaps: number;
@@ -105,6 +108,7 @@ export function rankTopN(
     .map((a) => ({
       pool: a.pool,
       token: a.token,
+      anchor: a.anchor,
       anchorKind: a.anchorKind,
       volumeAnchor: a.volumeAnchor,
       swaps: a.swaps,

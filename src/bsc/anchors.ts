@@ -45,6 +45,44 @@ export function isAnchor(currency: string): boolean {
   return ANCHORS.has(currency.toLowerCase());
 }
 
+// --- Board routing ---
+//
+// Which anchor a pool is quoted in decides WHICH board it lands on. There are two,
+// one per Telegram topic: WBNB pairs and USDT pairs. Both are PancakeSwap v3 — the
+// split is by quote currency, not by DEX version.
+//
+// THIS MAP IS DELIBERATELY NARROWER THAN THE ANCHOR SET ABOVE. USDC and USD1 must
+// stay anchors: that is what stops a USDC/WBNB pool from being read as a pool
+// "about" USDC and printed as a mover. But a TOKEN/USDC pool is not a USDT pair,
+// and putting it under a USDT header would assert something untrue — the rows
+// render a symbol and an address, never the quote side, so nothing downstream
+// could correct the impression. Such pools are therefore indexed (their candles
+// and volume baselines keep accruing) and then left off both boards. It is a thin
+// slice: a 300-block v3 sample on 2026-08-15 held 82 BNB-anchored and 139
+// USDT-anchored pools out of 225 anchored ones. The worker logs the count each
+// cycle rather than discarding them silently.
+export type BoardKey = 'wbnb' | 'usdt';
+
+const BOARD_BY_ANCHOR: ReadonlyMap<string, BoardKey> = new Map([
+  // v3 has no native currency — only Infinity quotes address(0) — but routing it
+  // here costs nothing and keeps the two paths answering the same question.
+  [NATIVE_BNB, 'wbnb'],
+  [WBNB, 'wbnb'],
+  [USDT, 'usdt'],
+]);
+
+export function boardForAnchor(anchor: string): BoardKey | undefined {
+  return BOARD_BY_ANCHOR.get(anchor.toLowerCase());
+}
+
+// Board order is publish order, so it is also the order the two topics get posted
+// in. The label rides on the board itself: it is what the Danger Zone header and
+// the stdout renderer name the source.
+export const BOARDS: ReadonlyArray<{ key: BoardKey; label: string }> = [
+  { key: 'wbnb', label: 'PancakeSwap v3 (WBNB pairs)' },
+  { key: 'usdt', label: 'PancakeSwap v3 (USDT pairs)' },
+];
+
 export interface AnchorSide {
   anchor: string; // the anchor currency's address
   kind: AnchorKind;

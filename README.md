@@ -8,14 +8,23 @@ share nothing but a `.env` and a logger:
 | **the indexer** | reads the chain — sweeps Swap logs, ranks tokens onto a Top Movers board and a Danger Zone board, posts to Telegram | `npm start` |
 | **the LP bot** | writes to the chain — a DM-only Telegram bot that opens and closes PancakeSwap v3 positions, signing through KeeperHub | `npm run start:lp` |
 
-The indexer never signs anything and the bot never indexes. They point at different
-protocols on purpose: the boards index **both** v3 and Infinity, the bot LPs into
-**v3** ([why](#pancakeswap-v3-not-infinity--deliberately)).
+The indexer never signs anything and the bot never indexes. Both work **PancakeSwap
+v3** — the bot LPs into it ([why](#pancakeswap-v3-not-infinity--deliberately)), and
+the boards publish it as **two boards split by quote currency: WBNB pairs and USDT
+pairs**, one Telegram topic each. The Infinity indexer is built and tested but idle
+by default, since both topics carry v3; one variable turns it back on
+([here](#telegram-setup)).
 
 The indexer sweeps Swap logs in a rolling block window, works out which pools are
 anchored in BNB or a USD stable, aggregates per-token trading activity, prices each
 token on-chain, and ranks the result into a Top Movers board plus a Danger Zone board
 for anything below the market-cap gate. Boards print to stdout and post to Telegram.
+
+One sweep feeds both boards. Splitting after ranking rather than running two workers
+is what keeps the split free: the topic-only `eth_getLogs` storm (12 chunked requests
+at the 25-block cap) and every pool resolution happen once, and only the market-cap
+walk runs per board — so each gets its own top-5 and its own lookup budget, and a
+quiet WBNB window can't be starved by a busy USDT one.
 
 ## Quick start
 
@@ -148,7 +157,7 @@ alone is enough. Measured over a 300-block window:
 A straight WBNB-for-WETH substitution would have quietly indexed about 40% of the
 chain and produced a board that looked fine.
 
-Two consequences:
+Three consequences:
 
 - **Selection is an XOR, not "either side is an anchor."** A pool with anchors on
   *both* sides is a stable/stable or BNB/stable pair with no subject token. On BSC
@@ -158,6 +167,14 @@ Two consequences:
   comparable to the next row's. Aggregates stay in raw anchor units and convert once,
   at render time. Every BSC anchor is 18 decimals, so a stable amount *is* a USD
   amount and no float touches it.
+- **Board routing is narrower than the anchor set.** Indexing admits five anchors;
+  only WBNB (plus native BNB) and USDT route to a board. USDC and USD1 must stay
+  anchors — that is what stops a USDC/WBNB pool being read as a pool *about* USDC —
+  but a pool quoted in them is not a USDT pair, and a row shows a symbol, an address
+  and USD figures, never its quote side, so nothing downstream could correct a wrong
+  header. Those pools are indexed (their candles and baselines keep accruing) and
+  left off both boards; the worker logs the count each cycle rather than dropping
+  them silently.
 
 The volume **history** deliberately stays in anchor units. A pool always uses the same
 anchor, so its own baseline is self-consistent — and a failed BNB/USD read then cannot
@@ -346,11 +363,22 @@ npm run chat-id      # starts listening
 then send `/start` to the bot, or add it to a group and post anything there. The
 script writes `TELEGRAM_CHAT_ID` into `.env`.
 
-**Forum topics.** Set `V3_MOVERS_TOPIC_ID` and `V4_MOVERS_TOPIC_ID` to route each
-version to its own topic; the ids are the trailing number in a topic's `t.me/c/…`
-link. A Danger Zone board falls back to its own version's topic, so all of a
-version's data stays in one place — set `DANGER_ZONE_TOPIC_ID` to collect both
-versions' danger rows in a single separate topic instead.
+**Forum topics.** There are two boards, both PancakeSwap v3, split by the currency
+the pair is quoted in: **WBNB pairs** and **USDT pairs**, one topic each. Set
+`V3_WBNB_MOVERS_TOPIC_ID` and `V3_USDT_MOVERS_TOPIC_ID`; the ids are the trailing
+number in a topic's `t.me/c/…` link. The pre-split names are read as fallbacks, so a
+deployment configured before the split needs no edit — `V3_MOVERS_TOPIC_ID` (which
+routed the single v3 board) feeds the WBNB one and `V4_MOVERS_TOPIC_ID` (which routed
+Infinity) feeds the USDT one.
+
+A Danger Zone board falls back to its own board's topic, so all of one board's data
+stays in one place — set `DANGER_ZONE_TOPIC_ID` to collect every board's danger rows
+in a single separate topic instead.
+
+**The Infinity board is off by default.** Both topics now carry v3, so the Infinity
+worker has nowhere to post and does not run at all — an unrouted board still costs a
+sweep and hundreds of `eth_call`s per cycle. Set `INFINITY_MOVERS_TOPIC_ID` to bring
+it back as a third board on a topic of its own; the code path is unchanged.
 
 `TELEGRAM_ENABLED=0` runs the indexer without posting. If the token is present but
 the chat id is not, the process logs one warning and keeps printing to stdout.

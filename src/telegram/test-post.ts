@@ -85,11 +85,12 @@ async function main(): Promise<void> {
   );
   console.log('header message:', header ? 'sent' : 'FAILED');
 
+  // One per topic, so a test post proves BOTH routes rather than one of them twice.
   const main = await sendBoard(
     { rows, block: 25_740_450, fromBlock: 25_740_445, variant: 'main', label: 'test' },
-    'v3'
+    'wbnb'
   );
-  console.log('v3 board:', main ? 'sent' : 'FAILED');
+  console.log('WBNB board:', main ? 'sent' : 'FAILED');
 
   const danger = await sendBoard(
     {
@@ -97,9 +98,9 @@ async function main(): Promise<void> {
       block: 25_740_450,
       fromBlock: 25_740_445,
       variant: 'danger',
-      label: 'Uniswap v4 (ETH) — TEST',
+      label: 'PancakeSwap v3 (USDT pairs) — TEST',
     },
-    'cl'
+    'usdt'
   );
   console.log('danger board:', danger ? 'sent' : 'FAILED');
 
