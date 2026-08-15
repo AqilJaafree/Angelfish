@@ -4,6 +4,7 @@ import {
   isMuted,
   MAX_INLINE_WAIT_MS,
   muteRemainingMs,
+  PROBE_INTERVAL_MS,
   sendMessage,
 } from './sender';
 
@@ -94,5 +95,70 @@ describe('sendMessage flood-wait handling', () => {
     stub([new Response(JSON.stringify({ ok: false, error_code: 400, description: 'bad' }), { status: 200 })]);
     expect(await sendMessage('board')).toBe(false);
     expect(isMuted()).toBe(false);
+  });
+});
+
+// retry_after is an upper bound, not a countdown — a quoted 5,255s was observed
+// accepting again well before it elapsed. Serving out the full sentence idles
+// through a limit that is already gone, so the mute probes.
+describe('mute probing', () => {
+  let realFetch: typeof globalThis.fetch;
+  let attempts: number;
+
+  beforeEach(() => {
+    realFetch = globalThis.fetch;
+    attempts = 0;
+    clearMute();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    clearMute();
+  });
+
+  // Every request is counted, so "did anything reach the wire" is checkable.
+  const respond = (fn: () => Response): void => {
+    globalThis.fetch = (async () => {
+      attempts++;
+      const r = fn();
+      return r.clone();
+    }) as unknown as typeof fetch;
+  };
+
+  it('lets exactly ONE message through per interval, not the whole cycle', async () => {
+    respond(() => flood(5255));
+    await sendMessage('trips the mute');
+    const afterTrip = attempts;
+    expect(isMuted()).toBe(true);
+
+    // A cycle publishing three boards must put at most one probe on the wire —
+    // and the trip itself already consumed this interval's slot.
+    for (const b of ['board 1', 'board 2', 'board 3']) expect(await sendMessage(b)).toBe(false);
+    expect(attempts).toBe(afterTrip);
+  });
+
+  it('unmutes the moment a probe succeeds, without waiting out the quote', async () => {
+    respond(() => flood(5255));
+    await sendMessage('trips the mute');
+    expect(muteRemainingMs()).toBeGreaterThan(5_000_000);
+
+    // Force the probe window open, then let Telegram accept.
+    clearMute();
+    respond(() => ok());
+    expect(await sendMessage('probe')).toBe(true);
+    expect(isMuted()).toBe(false);
+    expect(muteRemainingMs()).toBe(0);
+  });
+
+  // The probe must be scheduled well inside the quoted wait, or it never fires.
+  it('schedules the next probe inside the quoted wait, not after it', async () => {
+    respond(() => flood(5255));
+    await sendMessage('trips the mute');
+    const quoted = muteRemainingMs();
+    expect(quoted).toBeGreaterThan(PROBE_INTERVAL_MS);
+    // Just past one probe interval, sending is allowed again even though the
+    // quoted wait has hours left.
+    const afterInterval = Date.now() + PROBE_INTERVAL_MS + 1000;
+    expect(isMuted(afterInterval)).toBe(false);
+    expect(muteRemainingMs(afterInterval)).toBeGreaterThan(0);
   });
 });

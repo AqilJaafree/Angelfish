@@ -42,13 +42,27 @@ export const MAX_INLINE_WAIT_MS = parseInt(
   10
 );
 
-// When Telegram hands back a long flood-wait, every send is refused until this
-// passes. Module state on purpose: the limit applies to the BOT, not to one call,
-// so it has to be visible to every other caller.
+// How often a mute lets a SINGLE message through to test whether the limit has
+// actually lifted. Measured on 2026-08-15: Telegram quoted retry_after 5255s but
+// was accepting again well before it elapsed — the value is an upper bound, not a
+// countdown, so waiting it out blindly idles through a limit that is already gone.
+export const PROBE_INTERVAL_MS = parseInt(
+  process.env.TELEGRAM_PROBE_INTERVAL_MS ?? '300000',
+  10
+);
+
+// When Telegram hands back a long flood-wait, sends are refused until this passes.
+// Module state on purpose: the limit applies to the BOT, not to one call, so it has
+// to be visible to every other caller.
 let mutedUntil = 0;
+// The earliest a probe may go out. Exactly one message is allowed per interval —
+// consumed by whichever send arrives first, so a cycle publishing three boards
+// still puts only ONE on the wire. That single-message ceiling is what keeps
+// probing from re-becoming the burst this whole mechanism exists to prevent.
+let nextProbeAt = 0;
 
 export function isMuted(now: number = Date.now()): boolean {
-  return now < mutedUntil;
+  return now < mutedUntil && now < nextProbeAt;
 }
 
 export function muteRemainingMs(now: number = Date.now()): number {
@@ -58,6 +72,7 @@ export function muteRemainingMs(now: number = Date.now()): number {
 // Exported for tests; also lets an operator clear a mute without a restart.
 export function clearMute(): void {
   mutedUntil = 0;
+  nextProbeAt = 0;
 }
 
 // Send one HTML message, honouring `parameters.retry_after` exactly — guessing a
@@ -71,21 +86,38 @@ export function clearMute(): void {
 // re-tripped the limit — the exact outcome the retry_after is there to prevent.
 //
 // So a long wait is RECORDED rather than slept through: it mutes the transport,
-// every later send is refused cheaply, and no work piles up. Nothing is queued
-// because a board is worthless by the time an hours-long wait expires — its block
-// window is long gone, and the next cycle's board is strictly better.
+// later sends are refused cheaply, and no work piles up. Nothing is queued because a
+// board is worthless by the time an hours-long wait expires — its block window is
+// long gone, and the next cycle's board is strictly better.
+//
+// The mute PROBES rather than serving out the full sentence. retry_after is an upper
+// bound, not a countdown: on 2026-08-15 a quoted 5,255s was accepting again long
+// before it elapsed, and a blind wait would have idled ~55 minutes for nothing. So
+// one message per PROBE_INTERVAL_MS is let through to test the water, and a success
+// clears the mute immediately. The one-per-interval ceiling is what keeps probing
+// from turning back into the burst this mechanism exists to prevent.
 export async function sendMessage(
   text: string,
   threadId?: string,
   tries = 3
 ): Promise<boolean> {
   if (!BOT_TOKEN || !CHAT_ID) return false;
-  if (isMuted()) {
-    logger.warn(
-      { remainingMs: muteRemainingMs() },
-      'telegram: muted by an earlier flood-wait, dropping this message'
+  const enteredAt = Date.now();
+  if (enteredAt < mutedUntil) {
+    if (enteredAt < nextProbeAt) {
+      logger.warn(
+        { remainingMs: muteRemainingMs(enteredAt) },
+        'telegram: muted by an earlier flood-wait, dropping this message'
+      );
+      return false;
+    }
+    // This call IS the probe. Consume the slot before sending, so any other board
+    // in the same cycle is refused rather than riding along behind it.
+    nextProbeAt = enteredAt + PROBE_INTERVAL_MS;
+    logger.info(
+      { remainingMs: muteRemainingMs(enteredAt) },
+      'telegram: probing whether the flood-wait has lifted'
     );
-    return false;
   }
   const body: Record<string, unknown> = {
     chat_id: CHAT_ID,
@@ -105,14 +137,27 @@ export async function sendMessage(
         signal: AbortSignal.timeout(20000),
       });
       const json = (await res.json()) as TelegramResponse;
-      if (json.ok) return true;
+      if (json.ok) {
+        if (mutedUntil) {
+          logger.info(
+            { quotedRemainingMs: muteRemainingMs() },
+            'telegram: probe succeeded, flood-wait lifted early, unmuting'
+          );
+          clearMute();
+        }
+        return true;
+      }
 
       if (json.error_code === 429) {
         const wait = (json.parameters?.retry_after ?? 5) * 1000;
         if (wait > MAX_INLINE_WAIT_MS) {
-          mutedUntil = Date.now() + wait;
+          const at = Date.now();
+          mutedUntil = at + wait;
+          // Probe again well before the quoted wait expires — that value is an
+          // upper bound, and the limit routinely lifts sooner.
+          nextProbeAt = at + Math.min(wait, PROBE_INTERVAL_MS);
           logger.warn(
-            { wait, mutedUntilMs: mutedUntil },
+            { wait, mutedUntilMs: mutedUntil, nextProbeInMs: nextProbeAt - at },
             'telegram: long flood-wait, muting transport instead of sleeping'
           );
           return false;

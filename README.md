@@ -372,6 +372,13 @@ Two send-path behaviours worth knowing:
   a board is worthless once an hours-long wait expires: its block window is long
   gone and the next cycle's board is strictly better. Short waits
   (≤ `TELEGRAM_MAX_INLINE_WAIT_MS`, default 60s) still sleep and retry as before.
+  **The mute probes rather than serving out the sentence.** `retry_after` is an
+  upper bound, not a countdown — a quoted 5,255s was observed accepting again long
+  before it elapsed, and waiting it out blindly cost ~55 minutes of boards for
+  nothing. One message per `TELEGRAM_PROBE_INTERVAL_MS` (default 5 min) is let
+  through to test the water, and a success clears the mute immediately. The
+  one-per-interval ceiling is what stops probing becoming the burst again: a cycle
+  publishing three boards still puts exactly one on the wire.
 - A board that would exceed Telegram's 4096-character limit **drops whole rows** from
   the tail. Cutting the text instead would sever an HTML tag, and Telegram rejects an
   unparseable body outright — costing the entire board rather than its last row.
