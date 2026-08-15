@@ -226,13 +226,27 @@ ceiling the Ethereum build used, so its guard would have admitted it and one suc
 would dominate a board's fee column. The ceiling is now a plausible maximum
 (`MOVERS_MAX_FEE_PIPS`, default 10%); volume is unaffected either way.
 
-### Boards rank on a volume spike, not absolute volume (`bsc/volume-history.ts`)
+### Boards rank on swap count, with a volume spike as the alternative (`bsc/volume-history.ts`)
 
-Absolute volume is a near-constant property of a pool. The busiest pool is the busiest
-pool on almost every window — which is exactly what makes it uninteresting on a
-*movers* board. What changes when something happens is a pool's volume **relative to
-its own recent baseline**, so that ratio is what the boards rank on and what each row
-leads with (`22×`).
+`MOVERS_RANK_BY` picks between two orderings. Both are computed every cycle; the
+setting changes only the sort, never what a row says about itself.
+
+| | `swaps` (default) | `spike` |
+|---|---|---|
+| Orders by | raw `Swap` events in the window | volume ÷ that pool's own recent baseline |
+| Leaders | the genuinely busiest pools | pools doing something unusual *for themselves* |
+| Weakness | swap count is fairly stable per pool, so the top slots look similar cycle to cycle | a pool that normally trades nothing can win on small absolute numbers |
+| Warm-up | none — a pool is rankable on its first trade | needs 3 finalized buckets; unscored pools sit behind the scored ones |
+| Ties | broken by USD volume — the tail is mostly 1- and 2-swap pools, so ties are the common case | n/a |
+
+The spike exists because absolute volume is a near-constant property of a pool: the
+busiest pool is the busiest pool on almost every window, which is what makes it
+uninteresting on a *movers* board. Swap count is less rigid than volume but shares
+some of that character, which is the trade being made by the default.
+
+Neither number is shown on the Telegram row. The spike is printed by the **stdout**
+renderer only (`bsc/format.ts`), so why a row placed where it did stays visible in the
+Railway logs; on the board it read as a price move rather than as a ratio.
 
 **The comparison is per-block rate, not raw totals.** Windows are not a fixed size, so
 comparing totals would largely measure how many blocks each side happened to cover;

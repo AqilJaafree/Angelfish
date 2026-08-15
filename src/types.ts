@@ -36,10 +36,12 @@ export interface MoversRow {
   feeTier?: string; // pool fee tier for display, e.g. "0.3%" or "dynamic"
   rsi?: number; // RSI-14 over 5-min candles; undefined = warming up
   rsiLabel?: 'oversold' | 'overbought';
-  // How many times its own recent baseline this pool is trading at. This is
-  // what the boards rank on. undefined = not scoreable yet (too little history,
-  // or too little volume to be worth scoring) — that row was ranked on raw
-  // volume instead, behind every scored one.
+  // How many times its own recent baseline this pool is trading at. Computed on
+  // every row whatever MOVERS_RANK_BY is set to, but only the ORDERING authority
+  // when it is 'spike'; the default ranking is raw swap count. Rendered by the
+  // stdout board and deliberately not by the Telegram one, where it read as a
+  // price move. undefined = not scoreable yet (too little history, or too little
+  // volume to be worth scoring).
   spike?: number;
   // Fully-diluted valuation in USD, priced from the token's own pool.
   // undefined = no cap known → the row is routed to the Danger Zone board.

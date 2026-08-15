@@ -175,6 +175,37 @@ export function spikeScore(
 // on raw anchor amounts would rank one BNB above one thousand USDT. Undefined (a
 // volume that could not be valued) sorts last rather than as zero, so an unpriceable
 // row never displaces one that is merely small.
+// Rank by raw swap count: the busiest pool in the window first.
+//
+// The sibling of sortBySpike, and the default — see MOVERS_RANK_BY in config.ts for
+// the trade-off between them. Two structural differences from the spike ranking:
+//
+// There is no warming-up tier. Every pool in the window has a swap count by
+// construction, so nothing is unrankable and no row has to be parked behind the
+// others while it accumulates history. A pool is rankable on its first ever trade.
+//
+// Ties are broken by USD volume rather than left to input order, because on a
+// 300-block window ties are the COMMON case, not the edge one: the tail is mostly
+// 1- and 2-swap pools. Without a tiebreak their order would be whatever the sweep
+// happened to return and would reshuffle every cycle for no reason. USD and not
+// anchor units, since these rows come from pools with different anchors — an
+// anchor-unit tiebreak would rank one BNB above a thousand USDT. An unpriceable
+// volume sorts last rather than as zero, so it never displaces a merely small one.
+export function sortBySwaps<T>(
+  rows: T[],
+  swapsOf: (row: T) => number,
+  volumeOf: (row: T) => bigint | undefined
+): T[] {
+  return [...rows].sort((a, b) => {
+    const bySwaps = swapsOf(b) - swapsOf(a);
+    if (bySwaps !== 0) return bySwaps;
+    const [x, y] = [volumeOf(a), volumeOf(b)];
+    if (x === undefined) return y === undefined ? 0 : 1;
+    if (y === undefined) return -1;
+    return y > x ? 1 : y < x ? -1 : 0;
+  });
+}
+
 export function sortBySpike<T>(
   rows: T[],
   scoreOf: (row: T) => number | undefined,

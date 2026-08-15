@@ -101,6 +101,22 @@ export const CL_POOL_MANAGER = (
 // --- Board knobs ---
 // Rows per board. Raising this raises MCAP_MAX_LOOKUPS with it — see below.
 export const TOP_N = parseInt(process.env.MOVERS_TOP_N ?? '8', 10);
+
+// What the boards rank on.
+//
+//   'swaps' (default) — raw Swap-event count in the window, busiest pool first.
+//   'spike'           — window volume against that pool's OWN recent baseline.
+//
+// The trade-off is worth knowing before flipping it. Swap count is a fairly stable
+// property of a pool, so 'swaps' puts the genuinely busiest pools on top and the
+// leaders will look similar cycle to cycle. 'spike' surfaces pools doing something
+// unusual FOR THEMSELVES, which keeps the board turning over but lets a pool that
+// normally trades nothing win on small absolute numbers.
+//
+// The spike is computed and displayed either way (the stdout renderer prints it),
+// so switching this changes the ORDER, never what a row says about itself.
+export type RankMode = 'swaps' | 'spike';
+export const RANK_BY: RankMode = process.env.MOVERS_RANK_BY === 'spike' ? 'spike' : 'swaps';
 // 120s. At ~0.45s/block that is ~267 blocks, so a 300-block window gives continuous
 // coverage with a small overlap rather than a gap.
 export const POLL_SECONDS = parseInt(process.env.MOVERS_POLL_SECONDS ?? '120', 10);

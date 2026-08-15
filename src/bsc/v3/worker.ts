@@ -22,11 +22,12 @@ import {
   WBNB_USDT_POOL,
   WBNB,
   BSC_LOG_RPC_URL,
+  RANK_BY,
 } from '../config';
 import { BoardKey, BOARDS, boardForAnchor, toUsd } from '../anchors';
 import { sqrtPriceToSeriesValue } from '../price';
 import { recordSwapPrice } from '../candles';
-import { recordVolume, spikeScore, sortBySpike } from '../volume-history';
+import { recordVolume, spikeScore, sortBySpike, sortBySwaps } from '../volume-history';
 import { rsiForSeries } from '../rsi-tag';
 import { resolveTokenMeta, computeFdvUsd } from '../onchain-mcap';
 import { resolveBnbUsd } from '../bnb-price';
@@ -217,25 +218,41 @@ export async function moversCycle(): Promise<CycleResult | undefined> {
     //    which pools clear the threshold is unknowable until priced; the walk is
     //    what keeps that from costing one lookup per pool per cycle.
     //
-    // Rank by how far each pool is trading above its OWN recent baseline, not by
-    // absolute volume. Absolute volume is near-constant per pool — the biggest pool
-    // is the biggest pool on almost every window — so ranking on it reports the same
-    // handful of names forever. Pools without enough history to score fall back to
-    // USD volume order behind the scored ones.
+    // WHAT the order is comes from RANK_BY — raw swap count by default, the volume
+    // spike if configured. See config.ts for the trade-off.
+    //
+    // The spike is attached to every row either way, whichever mode is ranking.
+    // The stdout renderer prints it, so why a row placed where it did stays
+    // readable in the logs, and flipping RANK_BY then changes only the ORDER and
+    // never what a row says about itself.
     //
     // Established tokens are dropped BEFORE the market-cap walk. They were not just
     // crowding the board, they were spending its lookup budget: each one consumed a
     // resolver call to establish a cap nobody needed, against a ceiling of 25.
-    const withUsd = rankTopN(aggregates, aggregates.size).map((r) => ({
-      ...r,
-      volumeUsd: toUsd(r.volumeAnchor, r.anchorKind, bnbUsd),
-    }));
-    const scoredRanked = sortBySpike(
-      withUsd,
-      (r) => spikeScore(state.volumes[r.pool], r.volumeAnchor, windowBlocks, r.volumeUsd),
-      (r) => r.volumeUsd
-    );
-    const { kept: ranked, dropped } = filterDenied(scoredRanked);
+    const withUsd = rankTopN(aggregates, aggregates.size)
+      .map((r) => ({
+        ...r,
+        volumeUsd: toUsd(r.volumeAnchor, r.anchorKind, bnbUsd),
+      }))
+      // Second pass, not one literal: the spike's eligibility floor is denominated
+      // in USD, so it needs the volumeUsd the pass above just computed.
+      .map((r) => ({
+        ...r,
+        spike: spikeScore(state.volumes[r.pool], r.volumeAnchor, windowBlocks, r.volumeUsd),
+      }));
+    const ordered =
+      RANK_BY === 'spike'
+        ? sortBySpike(
+            withUsd,
+            (r) => r.spike,
+            (r) => r.volumeUsd
+          )
+        : sortBySwaps(
+            withUsd,
+            (r) => r.swaps,
+            (r) => r.volumeUsd
+          );
+    const { kept: ranked, dropped } = filterDenied(ordered);
     if (dropped) logger.debug({ dropped }, 'movers-v3: filtered established tokens');
     if (ranked.length === 0) {
       state.lastProcessedBlock = currentBlock;

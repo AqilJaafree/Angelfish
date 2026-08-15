@@ -7,6 +7,7 @@ import {
   MIN_SPIKE_VOLUME_USD,
   recordVolume,
   sortBySpike,
+  sortBySwaps,
   spikeScore,
   VolumeState,
 } from './volume-history';
@@ -134,6 +135,65 @@ describe('spikeScore', () => {
     const score = spikeScore(warmed(5, 1e-9), UNITS(1000), 1);
     expect(Number.isFinite(score!)).toBe(true);
     expect(score).toBeLessThanOrEqual(MAX_SPIKE);
+  });
+});
+
+describe('sortBySwaps', () => {
+  const vol = (r: { v: number }): bigint => UNITS(r.v);
+
+  it('ranks by raw swap count, not by volume or spike', () => {
+    const rows = [
+      { id: 'whale', v: 500, n: 3 },
+      { id: 'busy', v: 2, n: 74 },
+      { id: 'mid', v: 50, n: 20 },
+    ];
+    expect(sortBySwaps(rows, (r) => r.n, vol).map((r) => r.id)).toEqual(['busy', 'mid', 'whale']);
+  });
+
+  // On a 300-block window the tail is mostly 1- and 2-swap pools, so ties are the
+  // common case. Left unbroken, their order is whatever the sweep returned and
+  // reshuffles every cycle for no reason.
+  it('breaks ties on USD volume so the tail is stable', () => {
+    const rows = [
+      { id: 'tie-small', v: 1, n: 2 },
+      { id: 'tie-big', v: 900, n: 2 },
+      { id: 'tie-mid', v: 40, n: 2 },
+    ];
+    expect(sortBySwaps(rows, (r) => r.n, vol).map((r) => r.id)).toEqual([
+      'tie-big',
+      'tie-mid',
+      'tie-small',
+    ]);
+  });
+
+  // An unpriceable row is a BNB-quoted pool during a failed BNB/USD read. It must
+  // not displace a merely small one by being treated as zero — or as huge.
+  it('sorts an unpriceable volume last within a tie, never as zero', () => {
+    const rows = [
+      { id: 'unpriced', v: 0, n: 2 },
+      { id: 'small', v: 1, n: 2 },
+    ];
+    const volMaybe = (r: { id: string; v: number }): bigint | undefined =>
+      r.id === 'unpriced' ? undefined : UNITS(r.v);
+    expect(sortBySwaps(rows, (r) => r.n, volMaybe).map((r) => r.id)).toEqual(['small', 'unpriced']);
+  });
+
+  // No warming-up tier, unlike sortBySpike: a pool is rankable on its first trade.
+  it('ranks a brand-new pool on its first trade rather than parking it', () => {
+    const rows = [
+      { id: 'established', v: 500, n: 4 },
+      { id: 'brand-new', v: 1, n: 9 },
+    ];
+    expect(sortBySwaps(rows, (r) => r.n, vol)[0].id).toBe('brand-new');
+  });
+
+  it('does not mutate the caller\'s array', () => {
+    const rows = [
+      { id: 'a', v: 1, n: 1 },
+      { id: 'b', v: 1, n: 9 },
+    ];
+    sortBySwaps(rows, (r) => r.n, vol);
+    expect(rows.map((r) => r.id)).toEqual(['a', 'b']);
   });
 });
 
