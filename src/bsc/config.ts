@@ -163,26 +163,38 @@ export const SEL_DECIMALS = '0x313ce567'; // decimals()
 // through unmodified and the bytes25 left-alignment dance is not needed here.
 export const SEL_POOL_ID_TO_KEY = '0x0e2d484a';
 
-// --- Explorer (contract verification + source scan) ---
+// --- Contract verification + source scan ---
+//
 // There is NO Blockscout instance for BSC — bsc.blockscout.com, bscscan.blockscout.com,
 // binance.blockscout.com and bnb.blockscout.com all 404 — so unlike the Ethereum
-// build this cannot be a Blockscout URL swap. The only general source API for BSC is
-// Etherscan's V2 multichain endpoint (BscScan's own V1 is deprecated and answers
-// `"You are using a deprecated V1 endpoint"`), which requires a free API key.
+// build this cannot be a Blockscout URL swap. Two sources are used instead, tried in
+// order by audit.ts.
+//
+// SOURCIFY IS THE KEYLESS DEFAULT, which is what keeps the badges working out of the
+// box. Measured against 60 real board tokens on 2026-08-15 it answered for 48 — 80% —
+// and its payload is a flat `{file: {content}}` map, simpler than Etherscan's blob.
+// An unverified address is a clean 404. Other keyless options were checked and
+// rejected: Routescan answers `"chain not supported"` for BSC, and anyabi.xyz returns
+// only an ABI, which a SOURCE scan cannot use.
+export const SOURCIFY_API = (
+  process.env.BSC_SOURCIFY_API ?? 'https://sourcify.dev/server'
+).replace(/\/$/, '');
+
+// Etherscan's V2 multichain endpoint, used to cover the addresses Sourcify does not
+// have. BscScan's own V1 is retired and answers every request with "You are using a
+// deprecated V1 endpoint". OPTIONAL: it needs a free key from etherscan.io/apis, and
+// with no key configured this source is simply skipped.
 export const EXPLORER_API = (
   process.env.BSC_EXPLORER_API ?? 'https://api.etherscan.io/v2/api'
 ).replace(/\/$/, '');
 export const EXPLORER_CHAIN_ID = process.env.BSC_EXPLORER_CHAIN_ID ?? '56';
-// Free key from etherscan.io/apis. Without it the audit lookups are skipped entirely
-// rather than firing calls that can only fail — see AUDIT_ENABLED below.
 export const EXPLORER_API_KEY = process.env.BSC_EXPLORER_API_KEY ?? '';
+
 // Human-facing explorer, used for the token links in Telegram messages.
 export const EXPLORER_BASE = (process.env.BSC_EXPLORER_BASE ?? 'https://bscscan.com').replace(
   /\/$/,
   ''
 );
-// Set MOVERS_AUDIT_ENABLED=0 to skip verification/audit lookups entirely. Also off
-// implicitly when no API key is configured: every call would 403, once per new token,
-// and paint the whole board with the same "couldn't audit" badge a disabled detector
-// already produces — but at the cost of an HTTP round-trip each time.
-export const AUDIT_ENABLED = process.env.MOVERS_AUDIT_ENABLED !== '0' && EXPLORER_API_KEY !== '';
+// Set MOVERS_AUDIT_ENABLED=0 to skip verification/audit lookups entirely. This no
+// longer depends on an API key being present, because Sourcify does not need one.
+export const AUDIT_ENABLED = process.env.MOVERS_AUDIT_ENABLED !== '0';

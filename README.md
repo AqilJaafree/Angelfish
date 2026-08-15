@@ -274,23 +274,41 @@ the active one, at 840 swaps in a 400-block sample against 14 for the 0.05% pool
 It matters less here than ETH/USD did on Ethereum, and deliberately so: only the
 BNB-anchored rows need it. A failure costs part of a board rather than all of it.
 
-### Contract verification comes from Etherscan V2, not Blockscout (`bsc/audit.ts`)
+### Contract verification: Sourcify first, Etherscan second (`bsc/audit.ts`)
 
 **There is no Blockscout instance for BNB Chain** — `bsc.blockscout.com`,
 `bscscan.blockscout.com`, `binance.blockscout.com` and `bnb.blockscout.com` all 404 —
 and BscScan's own V1 API is retired, answering every request with *"You are using a
-deprecated V1 endpoint."* The only general source API is Etherscan's V2 multichain
-endpoint at `chainid=56`, which needs a free key.
+deprecated V1 endpoint."* So this is a different provider with a different response
+shape, not a changed base URL.
 
-That is a different provider with a different response shape, not a changed base URL.
+Two sources are tried in order:
+
+| | key needed | coverage | shape |
+|---|---|---|---|
+| **Sourcify** | no | **48/60** real board tokens (80%) | flat `{file: {content}}`, clean 404 when absent |
+| **Etherscan V2** (`chainid=56`) | yes, free | covers what Sourcify lacks | `SourceCode` blob, 200 + empty field when absent |
+
+**Sourcify leads because it needs no key**, which is what keeps the badges working
+out of the box. Etherscan is optional and simply skipped when unconfigured. Other
+keyless options were checked and rejected: Routescan answers `"chain not supported"`
+for BSC, and `anyabi.xyz` returns only an ABI, which a *source* scan cannot use.
+
+Two rules govern the chain, and both exist because a mistake here is invisible on the
+board but persistent in state:
+
+- **A negative is cached only when *every* source says not-found.** Sourcify holds
+  only contracts someone submitted, so its 404 means "not here", not "not verified
+  anywhere" — stopping there would badge the ~20% it lacks as unverified.
+- **A transient failure abandons the lookup rather than falling through.** Otherwise a
+  Sourcify outage would silently demote every token to whatever the next source said,
+  and an outage of both would cache "unverified" across the whole board for the TTL.
+
 Etherscan packs a multi-file verification into one `SourceCode` string holding a JSON
-document wrapped in an **extra pair of braces**; a single-file contract arrives as
-plain Solidity. Both are flattened before scanning, because a mint or blacklist
-usually lives in an inherited base and scanning only the entry file would quietly stop
-catching the common case.
-
-Without `BSC_EXPLORER_API_KEY` the lookups are skipped entirely rather than firing
-calls that can only fail.
+document wrapped in an **extra pair of braces**; Sourcify's is already a flat map.
+Both are flattened before scanning, because a mint or blacklist usually lives in an
+inherited base and scanning only the entry file would quietly stop catching the
+common case.
 
 ### Cadence follows ~0.45s blocks
 
@@ -799,9 +817,15 @@ Two things the exit confirmed that only a live run could:
   Raising it costs two sequential `eth_call`s per extra lookup, since the walk is
   deliberately lazy and cannot be batched without pricing every token to find out
   which ones mattered.
-- **Verification badges need an API key.** There is no Blockscout for BNB Chain, so
-  without `BSC_EXPLORER_API_KEY` the ✅/⚠️ and 🟢🟡🔴 badges are absent entirely
-  rather than degraded.
+- **Verification coverage is ~80% without a key.** Sourcify answered for 48 of 60
+  sampled board tokens; the rest render `⚠️⬜`. Setting the free
+  `BSC_EXPLORER_API_KEY` adds Etherscan V2 as a second source to cover the gap.
+- **Cycle time is marginal against the poll interval.** With the audit enabled a cold
+  cycle measured 89–135s across runs, against `MOVERS_POLL_SECONDS=120` and a
+  300-block window that spans ~135s of chain. Most of the variance is network, in the
+  metadata and market-cap stages rather than the audit (~13s of it). An overrun is
+  absorbed by the `cycleRunning` guard and logged, but it means a skipped window —
+  raise `MOVERS_MAX_LOOKBACK_BLOCKS` for headroom if you see the downtime clamp firing.
 - **The LP bot's BNB Chain path has not executed live.** Every address is verified
   on-chain and the fee ladder is corrected, but the round trip in
   [Proven live](#proven-live--on-ethereum-before-the-bnb-chain-port) ran on Ethereum
