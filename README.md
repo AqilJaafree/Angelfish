@@ -505,7 +505,7 @@ npm run lp-bot
 /exit  1 50                              take out half of it
 /audit 0x4691…5d4b                       verification + source scan
 /history                                 what this wallet has signed
-/confirm 7KQ4MX                          execute it
+/confirm 7KQ4MX                          ⛔ disabled — see above
 /positions /wallet /status /cancel /help
 ```
 
@@ -688,7 +688,27 @@ owner's identity is a secret of the deployment, so it lives only in the gitignor
 
 Both rejections return identical text, so replies can't be used to probe who the owner is.
 
+### Broadcasting is currently DISABLED
+
+> **The bot cannot sign or submit anything on BNB Chain.** The body of
+> `execute()` in `lp/plan.ts` is commented out, and `/confirm` refuses before it
+> reaches it. Quoting, pricing, allowance checks and simulation all still work —
+> `/lp`, `/exit`, `/pool`, `/wrap`, `/audit`, `/positions` and `/history` are
+> unaffected.
+>
+> The safety property is checkable in one line: `execute()` was the only caller that
+> ever passed `simulate: false`, so `grep -rn "simulate: false" src/` now matches
+> nothing but comments. The `simulate` field is also **required** in
+> `keeperhub.write`'s options type rather than optional, so no caller can omit it and
+> fall through to a real send.
+>
+> To re-enable: uncomment the block in `execute()`, drop the early return, restore
+> `cmdConfirm`, and fund `LP_WALLET_ADDRESS`.
+
 ### Nothing broadcasts without a confirm
+
+The gate below is what the design *is*, and what it returns to when execution is
+switched back on.
 
 `/lp` and `/exit` only ever **simulate**. They read the pool, build the tick range or
 value the liquidity, check existing allowances, simulate each step, and store the plan
@@ -699,6 +719,9 @@ not survive a restart. Single-use is the property that matters: a replayed confi
 would mint a second position just as successfully as the first. The TTL exists because
 a quote pins a tick range derived from a price that moves. Each step also carries an
 idempotency key (`lp-<code>-<index>`), so a retry after a timeout cannot double-broadcast.
+
+While execution is disabled, `/confirm` refuses **before** consuming the code, so a
+stored quote is not burned by an attempt that could never have broadcast.
 
 ### The two traps this path has to avoid
 

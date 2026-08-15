@@ -1,4 +1,3 @@
-import { logger } from '../logger';
 import {
   DEFAULT_RANGE_PCT, KEEPERHUB_API_KEY, OWNER_ID, POSITION_MANAGER, TICK_SPACING, TOKENS, WALLET_ADDRESS,
 } from './config';
@@ -6,7 +5,9 @@ import * as kh from './keeperhub';
 import * as pending from './pending';
 import { AuditEntry, auditToken, renderAuditLine, renderAuditReport, tokensNeedingAudit } from './audit';
 import { DEFAULT_TRAIL_LIMIT, fetchTrail, renderTrail } from './trail';
-import { execute, quoteExit, quoteLp, resolvePool, simulate, StepOutcome } from './plan';
+// `execute` is deliberately NOT imported: broadcasting is commented out, and leaving
+// the import would make it look reachable from here. See cmdConfirm below.
+import { quoteExit, quoteLp, resolvePool, simulate, StepOutcome } from './plan';
 import { ERC20_ABI, NPM_ABI, WBNB_DEPOSIT_ABI, fromBaseUnits, priceFromSqrt, resolveToken, toBaseUnits } from './pancake';
 
 export interface ParsedCommand {
@@ -29,7 +30,7 @@ const HELP = [
   '<code>/pool  &lt;A&gt; &lt;B&gt; &lt;fee&gt;</code>  pool price and tick',
   '<code>/lp    &lt;A&gt; &lt;B&gt; &lt;fee&gt; &lt;amtA&gt; &lt;amtB&gt; [range%]</code>  quote a position',
   '<code>/wrap  &lt;amount-bnb&gt;</code>  wrap BNB into WBNB',
-  '<code>/confirm &lt;code&gt;</code>  execute the quoted plan',
+  '<code>/confirm &lt;code&gt;</code>  ⛔ disabled — broadcasting is commented out',
   '<code>/positions</code>  open positions',
   '<code>/exit  [n] [percent]</code>  withdraw — run bare to pick from a list',
   '<code>/audit &lt;token&gt;</code>  contract verification and source scan',
@@ -41,7 +42,8 @@ const HELP = [
   `fee tiers: ${Object.keys(TICK_SPACING).join(', ')}  ·  symbols: ${Object.keys(TOKENS).join(', ')}`,
   'Addresses are accepted anywhere a symbol is.',
   '',
-  '<i>Every /lp and /exit is simulated first. Nothing is broadcast until /confirm.</i>',
+  '<i>Every /lp and /exit is quoted and simulated. Broadcasting is currently DISABLED,',
+  'so /confirm will not sign or submit anything — see src/lp/plan.ts.</i>',
   '<i>Pass 0 for one amount to open a single-sided position — the range is placed',
   'entirely on the side that needs only the token you hold.</i>',
   '<i>To close one: /exit lists your positions, then /exit 1 closes the first.</i>',
@@ -141,7 +143,8 @@ async function cmdLp(args: string[]): Promise<string> {
     `${plan.summary}\n\n<b>simulation</b>\n${outcomeLines(sim)}\n` +
     (notes.length ? `\n${notes.join('\n')}\n` : '') +
     `\n${allOk ? '✅ all steps simulate clean' : '⚠️ some steps would revert'}\n` +
-    `confirm with <code>/confirm ${stored.code}</code> — expires in 5 min`
+    `quote <code>${stored.code}</code> — expires in 5 min\n` +
+    '⛔ <i>broadcasting is disabled; /confirm will not sign anything</i>'
   );
 }
 
@@ -186,7 +189,11 @@ async function cmdWrap(args: string[]): Promise<string> {
     summary: `wrap <b>${amount} BNB</b> → WBNB`,
     steps: [{ label: `wrap ${amount} BNB`, contract: TOKENS.WBNB.address, fn: 'deposit', args: '[]', value: amount, abi: WBNB_DEPOSIT_ABI }],
   });
-  return `wrap <b>${amount} BNB</b> → WBNB\ngas ~${sim.gasEstimate ?? '?'}\n\nconfirm with <code>/confirm ${stored.code}</code>`;
+  return (
+    `wrap <b>${amount} BNB</b> → WBNB\ngas ~${sim.gasEstimate ?? '?'}\n\n` +
+    `quote <code>${stored.code}</code>\n` +
+    '⛔ <i>broadcasting is disabled; /confirm will not sign anything</i>'
+  );
 }
 
 const MAX_LISTED_POSITIONS = 10;
@@ -309,7 +316,8 @@ async function cmdExit(args: string[]): Promise<string> {
       ? '\n<i>collect and burn simulate against the position as it stands now, so they can report a revert until the withdraw ahead of them is applied. Confirm runs the steps in order.</i>\n'
       : '') +
     `\n${allOk ? '✅ all steps simulate clean' : '⚠️ some steps would revert'}\n` +
-    `confirm with <code>/confirm ${stored.code}</code> — expires in 5 min`
+    `quote <code>${stored.code}</code> — expires in 5 min\n` +
+    '⛔ <i>broadcasting is disabled; /confirm will not sign anything</i>'
   );
 }
 
@@ -331,15 +339,30 @@ async function cmdHistory(args: string[]): Promise<string> {
   return renderTrail(await fetchTrail(limit));
 }
 
+// /confirm is the only route that reaches plan.execute, and BROADCASTING IS
+// DISABLED — see the comment on execute() in plan.ts.
+//
+// The refusal happens here, BEFORE pending.take(), so a disabled bot does not
+// silently consume the single-use confirm code: the quote stays confirmable if
+// execution is turned back on, instead of being burned by an attempt that could
+// never have broadcast anyway.
 async function cmdConfirm(args: string[]): Promise<string> {
   if (!args[0]) return 'usage: <code>/confirm &lt;code&gt;</code>';
-  const plan = pending.take(args[0]);
-  if (!plan) return '❌ no such pending plan (it may already have been used).';
-  if ('expired' in plan) return '❌ that plan expired — re-quote with /lp.';
-  logger.warn({ code: plan.code, steps: plan.steps.length }, 'lp: executing confirmed plan');
-  const rows = await execute(plan.steps, plan.code);
-  const ok = rows.every((r) => r.ok);
-  return `${plan.summary}\n\n<b>execution</b>\n${outcomeLines(rows)}\n\n${ok ? '✅ complete' : '❌ stopped at the first failure'}`;
+  return (
+    '🚫 <b>execution is disabled</b>\n\n' +
+    'Broadcasting on BNB Chain is commented out in <code>src/lp/plan.ts</code>, so ' +
+    'nothing can be signed or submitted.\n\n' +
+    'Quoting and simulation still work — <code>/lp</code> and <code>/exit</code> ' +
+    'price the position and simulate every step.'
+  );
+
+  // const plan = pending.take(args[0]);
+  // if (!plan) return '❌ no such pending plan (it may already have been used).';
+  // if ('expired' in plan) return '❌ that plan expired — re-quote with /lp.';
+  // logger.warn({ code: plan.code, steps: plan.steps.length }, 'lp: executing confirmed plan');
+  // const rows = await execute(plan.steps, plan.code);
+  // const ok = rows.every((r) => r.ok);
+  // return `${plan.summary}\n\n<b>execution</b>\n${outcomeLines(rows)}\n\n${ok ? '✅ complete' : '❌ stopped at the first failure'}`;
 }
 
 export async function handle(cmd: ParsedCommand): Promise<string> {

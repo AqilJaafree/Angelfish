@@ -312,31 +312,57 @@ export async function simulate(steps: PlanStep[]): Promise<StepOutcome[]> {
   return out;
 }
 
-// Execute for real, stopping at the first failure. Each step carries an
-// idempotency key derived from the confirm code and its index, so a retry after
-// a timeout cannot broadcast the same approval or mint twice.
+// ===========================================================================
+// BROADCASTING IS DISABLED ON BNB CHAIN — the body below is commented out on
+// purpose, not stubbed out by accident.
+//
+// Everything up to and including simulation still runs: /lp and /exit quote,
+// price and simulate exactly as before. This function is the ONLY place that
+// passes `simulate: false` to KeeperHub, so commenting its body out is what
+// makes it impossible for the bot to sign or submit anything on chain 56.
+//
+// Left in place rather than deleted because the path is proven correct as far
+// as simulation (approve simulates OK, mint reverts only with STF against an
+// empty wallet), and the idempotency-key scheme below is the non-obvious part
+// worth preserving: each step keys off the confirm code and its index, so a
+// retry after a timeout cannot broadcast the same approval or mint twice.
+//
+// TO RE-ENABLE: delete the early return, uncomment the block, and make sure
+// LP_WALLET_ADDRESS is funded. Re-read `keeperhub-lp-execution-path` first.
+// ===========================================================================
 export async function execute(steps: PlanStep[], code: string): Promise<StepOutcome[]> {
-  const out: StepOutcome[] = [];
-  for (let i = 0; i < steps.length; i++) {
-    const s = steps[i];
-    try {
-      const res = await kh.write(s.contract, s.fn, JSON.parse(s.args), {
-        abi: s.abi,
-        value: s.value,
-        simulate: false,
-        idempotencyKey: `lp-${code}-${i}`,
-      });
-      const ok = res.success !== false;
-      out.push({
-        label: s.label,
-        ok,
-        detail: ok ? (res.transactionLink ?? res.executionId ?? res.status ?? 'submitted') : (res.error ?? 'failed'),
-      });
-      if (!ok) break;
-    } catch (err) {
-      out.push({ label: s.label, ok: false, detail: err instanceof Error ? err.message.slice(0, 300) : String(err) });
-      break;
-    }
-  }
-  return out;
+  logger.warn(
+    { code, steps: steps.length },
+    'lp: execution is disabled — broadcasting is commented out, nothing was signed'
+  );
+  return steps.map((s) => ({
+    label: s.label,
+    ok: false,
+    detail: 'execution disabled — broadcasting is commented out in plan.ts',
+  }));
+
+  /* eslint-disable no-unreachable */
+  // const out: StepOutcome[] = [];
+  // for (let i = 0; i < steps.length; i++) {
+  //   const s = steps[i];
+  //   try {
+  //     const res = await kh.write(s.contract, s.fn, JSON.parse(s.args), {
+  //       abi: s.abi,
+  //       value: s.value,
+  //       simulate: false,
+  //       idempotencyKey: `lp-${code}-${i}`,
+  //     });
+  //     const ok = res.success !== false;
+  //     out.push({
+  //       label: s.label,
+  //       ok,
+  //       detail: ok ? (res.transactionLink ?? res.executionId ?? res.status ?? 'submitted') : (res.error ?? 'failed'),
+  //     });
+  //     if (!ok) break;
+  //   } catch (err) {
+  //     out.push({ label: s.label, ok: false, detail: err instanceof Error ? err.message.slice(0, 300) : String(err) });
+  //     break;
+  //   }
+  // }
+  // return out;
 }
