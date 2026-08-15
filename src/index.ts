@@ -8,7 +8,7 @@ import { POLL_SECONDS, BSC_RPC_URL, BSC_LOG_RPC_URL } from './bsc/config';
 import { formatBoard } from './bsc/format';
 import { initMovers, moversCycle, CycleResult } from './bsc/v3/worker';
 import { initMoversCl, moversCycleCl } from './bsc/infinity/worker';
-import { isConfigured, sendBoard } from './telegram/sender';
+import { isConfigured, isMuted, muteRemainingMs, sendBoard } from './telegram/sender';
 import { MoversBoard } from './types';
 
 const STATE_DIR = process.env.STATE_DIR ?? path.join(process.cwd(), 'tmp');
@@ -32,11 +32,22 @@ async function publish(
   if (result.danger.length) {
     boards.push({ rows: result.danger, block: toBlock, fromBlock, variant: 'danger', label });
   }
+  // A long flood-wait mutes the transport (see telegram/sender.ts). Check it once
+  // per publish so a muted cycle skips posting outright instead of formatting every
+  // board and having each send refuse it in turn — the indexing work still
+  // happened and the cursor still advanced, only the posting is dropped.
+  const muted = TELEGRAM_ENABLED && isMuted();
+  if (muted) {
+    logger.warn(
+      { version, remainingMs: muteRemainingMs(), boards: boards.length },
+      'telegram: muted, printing boards to stdout only'
+    );
+  }
   for (const board of boards) {
     console.log(formatBoard(board));
     // sendBoard never throws — a Telegram outage must not stop the next board
     // from posting, and the block cursor has already been advanced by the worker.
-    if (TELEGRAM_ENABLED) await sendBoard(board, version);
+    if (TELEGRAM_ENABLED && !muted) await sendBoard(board, version);
   }
 }
 

@@ -363,7 +363,15 @@ Two send-path behaviours worth knowing:
 
 - A **429 is retried for exactly as long as Telegram asks** (`parameters.retry_after`).
   Guessing a backoff instead of honouring it is what turns a brief flood-wait into a
-  banned token.
+  banned token. **How** a long wait is honoured matters just as much: it is recorded
+  and the transport is muted, never slept through. Observed in production — a
+  5,849s (1.6h) flood-wait against a 120s poll left every tick sleeping inside its
+  own send, because the `cycleRunning` guard covers the cycle and not the publish.
+  That queued ~96 messages which would all have fired the moment the window expired
+  and instantly re-tripped the limit. Boards are dropped rather than queued, because
+  a board is worthless once an hours-long wait expires: its block window is long
+  gone and the next cycle's board is strictly better. Short waits
+  (≤ `TELEGRAM_MAX_INLINE_WAIT_MS`, default 60s) still sleep and retry as before.
 - A board that would exceed Telegram's 4096-character limit **drops whole rows** from
   the tail. Cutting the text instead would sever an HTML tag, and Telegram rejects an
   unparseable body outright — costing the entire board rather than its last row.

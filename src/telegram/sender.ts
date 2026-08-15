@@ -35,16 +35,58 @@ interface TelegramResponse {
   parameters?: { retry_after?: number };
 }
 
-// Send one HTML message. Retries on 429 for exactly as long as Telegram asks —
-// the Bot API returns the required wait in `parameters.retry_after`, and
-// guessing a backoff instead of honouring it is what turns a brief flood-wait
-// into a ban on the token.
+// Longest flood-wait this will sit and sleep through. Below it, sleeping and
+// retrying is right: the wait is a few seconds and the board still posts on time.
+export const MAX_INLINE_WAIT_MS = parseInt(
+  process.env.TELEGRAM_MAX_INLINE_WAIT_MS ?? '60000',
+  10
+);
+
+// When Telegram hands back a long flood-wait, every send is refused until this
+// passes. Module state on purpose: the limit applies to the BOT, not to one call,
+// so it has to be visible to every other caller.
+let mutedUntil = 0;
+
+export function isMuted(now: number = Date.now()): boolean {
+  return now < mutedUntil;
+}
+
+export function muteRemainingMs(now: number = Date.now()): number {
+  return Math.max(0, mutedUntil - now);
+}
+
+// Exported for tests; also lets an operator clear a mute without a restart.
+export function clearMute(): void {
+  mutedUntil = 0;
+}
+
+// Send one HTML message, honouring `parameters.retry_after` exactly — guessing a
+// backoff instead is what turns a brief flood-wait into a ban on the token.
+//
+// HOW a long wait is honoured is the load-bearing part, and sleeping through it is
+// the wrong answer. Observed in production: a 5,849s (1.6h) flood-wait with a 120s
+// poll meant every tick started a fresh cycle and its own sleeping send, because
+// the `cycleRunning` guard covers the CYCLE and not the publish. That queued ~96
+// sends, all of which would have fired the moment the window expired and instantly
+// re-tripped the limit — the exact outcome the retry_after is there to prevent.
+//
+// So a long wait is RECORDED rather than slept through: it mutes the transport,
+// every later send is refused cheaply, and no work piles up. Nothing is queued
+// because a board is worthless by the time an hours-long wait expires — its block
+// window is long gone, and the next cycle's board is strictly better.
 export async function sendMessage(
   text: string,
   threadId?: string,
   tries = 3
 ): Promise<boolean> {
   if (!BOT_TOKEN || !CHAT_ID) return false;
+  if (isMuted()) {
+    logger.warn(
+      { remainingMs: muteRemainingMs() },
+      'telegram: muted by an earlier flood-wait, dropping this message'
+    );
+    return false;
+  }
   const body: Record<string, unknown> = {
     chat_id: CHAT_ID,
     text,
@@ -67,6 +109,14 @@ export async function sendMessage(
 
       if (json.error_code === 429) {
         const wait = (json.parameters?.retry_after ?? 5) * 1000;
+        if (wait > MAX_INLINE_WAIT_MS) {
+          mutedUntil = Date.now() + wait;
+          logger.warn(
+            { wait, mutedUntilMs: mutedUntil },
+            'telegram: long flood-wait, muting transport instead of sleeping'
+          );
+          return false;
+        }
         logger.warn({ wait }, 'telegram: rate limited, honouring retry_after');
         await sleep(wait);
         continue;
