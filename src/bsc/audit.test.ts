@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fetchEtherscan,
   fetchGoPlus,
@@ -273,6 +273,52 @@ describe('fetchEtherscan without a key', () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+});
+
+// The key is read at MODULE SCOPE, so these reset the registry and re-import rather
+// than setting process.env and calling the existing binding.
+describe('EXPLORER_API_KEY name resolution', () => {
+  afterEach(() => {
+    delete process.env.BSC_EXPLORER_API_KEY;
+    delete process.env.ETHERSCAN_API_KEY;
+    vi.resetModules();
+  });
+
+  const keyWith = async (env: Record<string, string>): Promise<string> => {
+    vi.resetModules();
+    Object.assign(process.env, env);
+    return (await import('./config')).EXPLORER_API_KEY;
+  };
+
+  it('accepts the BSC-prefixed name', async () => {
+    expect(await keyWith({ BSC_EXPLORER_API_KEY: 'bsc-key' })).toBe('bsc-key');
+  });
+
+  // What Etherscan itself calls the key, and so what a key already on the machine is
+  // most likely to be named. Not accepting it left the source silently skipped with a
+  // perfectly valid key sitting in .env.
+  it('accepts the plain ETHERSCAN_API_KEY name', async () => {
+    expect(await keyWith({ ETHERSCAN_API_KEY: 'plain-key' })).toBe('plain-key');
+  });
+
+  it('prefers the BSC-prefixed name so a chain-specific key can override a shared one', async () => {
+    expect(
+      await keyWith({ BSC_EXPLORER_API_KEY: 'bsc-key', ETHERSCAN_API_KEY: 'plain-key' })
+    ).toBe('bsc-key');
+  });
+
+  // `BSC_EXPLORER_API_KEY=` with nothing after it is the commented-out-then-uncommented
+  // state, and it is EMPTY not undefined — so this has to fall through on falsiness,
+  // not on nullishness, or an empty prefixed name masks a real key.
+  it('falls through an empty prefixed name to ETHERSCAN_API_KEY', async () => {
+    expect(await keyWith({ BSC_EXPLORER_API_KEY: '', ETHERSCAN_API_KEY: 'plain-key' })).toBe(
+      'plain-key'
+    );
+  });
+
+  it('is empty when neither is set', async () => {
+    expect(await keyWith({})).toBe('');
   });
 });
 

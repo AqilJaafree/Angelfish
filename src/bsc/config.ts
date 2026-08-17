@@ -236,7 +236,13 @@ export const EXPLORER_API = (
   process.env.BSC_EXPLORER_API ?? 'https://api.etherscan.io/v2/api'
 ).replace(/\/$/, '');
 export const EXPLORER_CHAIN_ID = process.env.BSC_EXPLORER_CHAIN_ID ?? '56';
-export const EXPLORER_API_KEY = process.env.BSC_EXPLORER_API_KEY ?? '';
+// ETHERSCAN_API_KEY is accepted as well, and is the name to reach for first: it is
+// what Etherscan itself calls the key and what every other tool on the machine will
+// already be using, so a key pasted under that name works here without being renamed.
+// The BSC_-prefixed name stays first for consistency with the rest of this file and so
+// a BSC-specific key can override a shared one.
+export const EXPLORER_API_KEY =
+  process.env.BSC_EXPLORER_API_KEY || process.env.ETHERSCAN_API_KEY || '';
 
 // Human-facing explorer, used for the token links in Telegram messages.
 export const EXPLORER_BASE = (process.env.BSC_EXPLORER_BASE ?? 'https://bscscan.com').replace(
