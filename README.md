@@ -312,7 +312,7 @@ the active one, at 840 swaps in a 400-block sample against 14 for the 0.05% pool
 It matters less here than ETH/USD did on Ethereum, and deliberately so: only the
 BNB-anchored rows need it. A failure costs part of a board rather than all of it.
 
-### Contract verification: Sourcify first, Etherscan second (`bsc/audit.ts`)
+### Contract verification: three sources, and only one speaks for BscScan (`bsc/audit.ts`)
 
 **There is no Blockscout instance for BNB Chain** — `bsc.blockscout.com`,
 `bscscan.blockscout.com`, `binance.blockscout.com` and `bnb.blockscout.com` all 404 —
@@ -320,27 +320,47 @@ and BscScan's own V1 API is retired, answering every request with *"You are usin
 deprecated V1 endpoint."* So this is a different provider with a different response
 shape, not a changed base URL.
 
-Two sources are tried in order:
+**The trap this walked into first: Sourcify and BscScan are separate databases.**
+Verifying a contract on BscScan does *not* publish it to Sourcify, so a Sourcify 404
+means "not submitted here" and says nothing at all about the `✅` a user can see for
+themselves on bscscan.com. With no Etherscan key configured, Sourcify was the only
+voice in the chain, and on 2026-08-16 all four tokens the board had cached as
+unverified were open-source on BscScan and 404 on Sourcify.
 
-| | key needed | coverage | shape |
+Three sources are tried in order:
+
+| | key needed | what it knows | shape |
 |---|---|---|---|
 | **Sourcify** | no | **48/60** real board tokens (80%) | flat `{file: {content}}`, clean 404 when absent |
-| **Etherscan V2** (`chainid=56`) | yes, free | covers what Sourcify lacks | `SourceCode` blob, 200 + empty field when absent |
+| **Etherscan V2** (`chainid=56`) | yes, free | BscScan's data, with real source | `SourceCode` blob, 200 + empty field when absent |
+| **GoPlus** | no | BscScan's `is_open_source`, plus risk flags | `{code:1, result:{addr:{…}}}`, `result:{}` when unknown |
 
-**Sourcify leads because it needs no key**, which is what keeps the badges working
-out of the box. Etherscan is optional and simply skipped when unconfigured. Other
-keyless options were checked and rejected: Routescan answers `"chain not supported"`
-for BSC, and `anyabi.xyz` returns only an ABI, which a *source* scan cannot use.
+The two source-bearing providers lead because real code lets the scanner see what a
+contract actually does. **GoPlus is the backstop that makes the badge correct with no
+key set at all** — it is the only keyless source that reports *BscScan's* verification
+state. It returns no code, so it reports a verdict instead, and its flags
+(`is_mintable`, `is_blacklisted`, `transfer_pausable`, …) are first-hand answers to the
+questions the regex heuristic is otherwise guessing at. Two of its quirks are
+load-bearing: it must be asked for **one address at a time** (a four-address batch came
+back with a single entry even with all four warm in its cache) and it keys the result
+map by the **lowercased** address whatever case was sent.
 
-Two rules govern the chain, and both exist because a mistake here is invisible on the
+Other keyless options were checked and rejected: Routescan answers `"chain not
+supported"` for BSC, and `anyabi.xyz` returns only an ABI, which a *source* scan cannot
+use.
+
+Three rules govern the chain, and all exist because a mistake here is invisible on the
 board but persistent in state:
 
-- **A negative is cached only when *every* source says not-found.** Sourcify holds
-  only contracts someone submitted, so its 404 means "not here", not "not verified
-  anywhere" — stopping there would badge the ~20% it lacks as unverified.
+- **A source that never answered casts no vote.** An unconfigured Etherscan, or a
+  GoPlus with no record of the address, reports `skipped` — distinct from `not-found`.
+  Counting that silence as agreement is exactly what produced the wrong `⚠️`s.
+- **A negative is cached only on a *complete* vote.** If any source was skipped the
+  answer is "we don't know", which is left uncached and renders **no badge** — an
+  honest blank beats a confident wrong answer.
 - **A transient failure abandons the lookup rather than falling through.** Otherwise a
   Sourcify outage would silently demote every token to whatever the next source said,
-  and an outage of both would cache "unverified" across the whole board for the TTL.
+  and a total outage would cache "unverified" across the whole board for the TTL.
 
 Etherscan packs a multi-file verification into one `SourceCode` string holding a JSON
 document wrapped in an **extra pair of braces**; Sourcify's is already a flat map.
@@ -520,7 +540,7 @@ src/
     volume-history.ts       bucketed volume + the spike score boards rank on
     denylist.ts             established-token exclusion, by address
     mcap-select.ts          lazy market-cap walk → main / danger split
-    audit.ts                Etherscan V2 verification + heuristic source scan
+    audit.ts                Sourcify + Etherscan V2 + GoPlus verification, risk scan
     format.ts               stdout board rendering
     v3/        swaps · metadata · state · worker   (PancakeSwap v3)
     infinity/  decode · swaps · metadata · state · worker   (PancakeSwap Infinity CL)
@@ -926,9 +946,15 @@ Two things the exit confirmed that only a live run could:
   Raising it costs two sequential `eth_call`s per extra lookup, since the walk is
   deliberately lazy and cannot be batched without pricing every token to find out
   which ones mattered.
-- **Verification coverage is ~80% without a key.** Sourcify answered for 48 of 60
-  sampled board tokens; the rest render `⚠️⬜`. Setting the free
-  `BSC_EXPLORER_API_KEY` adds Etherscan V2 as a second source to cover the gap.
+- **Verification takes three sources, and Sourcify alone is not one.** Sourcify is
+  keyless and answered for 48 of 60 sampled board tokens, but it is a *separate
+  database from BscScan* — verifying on BscScan does not publish to Sourcify — so its
+  404 means "not submitted here", never "unverified". Relying on it alone badged four
+  BscScan-verified tokens `⚠️` on 2026-08-16. The chain is now Sourcify → Etherscan V2
+  (real source, needs the free `BSC_EXPLORER_API_KEY`, skipped without it) → GoPlus
+  (keyless, reports BscScan's own verification state plus its risk flags, so the `✅`
+  is right with no key set). A negative is cached only when every source actually
+  voted; if one was skipped the row renders no badge rather than a wrong one.
 - **Cycle time is network-bound and varies a lot.** With the audit enabled a cold
   cycle measured **58–86s** across runs, against `MOVERS_POLL_SECONDS=120` and a
   300-block window spanning ~135s of chain — so there is headroom, but not a wide

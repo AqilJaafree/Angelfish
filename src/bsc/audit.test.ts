@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { fetchEtherscan, flattenSource, resolveAudit, scanSource, SourceFetcher } from './audit';
+import {
+  fetchEtherscan,
+  fetchGoPlus,
+  flattenSource,
+  goPlusVerdict,
+  resolveAudit,
+  scanSource,
+  SourceFetcher,
+} from './audit';
 import { AuditResult } from '../types';
 
 // Etherscan's shape, which is NOT Blockscout's. A multi-file verification arrives
@@ -84,6 +92,7 @@ describe('resolveAudit source chain', () => {
   const found = (): SourceFetcher => async () => ({ status: 'found', source: VERIFIED });
   const missing = (): SourceFetcher => async () => ({ status: 'not-found' });
   const broken = (): SourceFetcher => async () => undefined;
+  const skipped = (): SourceFetcher => async () => ({ status: 'skipped' });
   const counted = (f: SourceFetcher, log: string[], name: string): SourceFetcher => async (t) => {
     log.push(name);
     return f(t);
@@ -141,12 +150,117 @@ describe('resolveAudit source chain', () => {
     expect(res).toBeUndefined();
     expect(log).toEqual(['a']); // never fell through
   });
+
+  // THE bug this chain was rewritten for. A source that never ran — no API key, or no
+  // record of the address — has said nothing about it, and counting that silence as a
+  // vote for "unverified" is what badged four BscScan-verified tokens ⚠️ on
+  // 2026-08-16. A skipped source keeps the chain moving but must not decide it.
+  it('does not cache a negative when a source was skipped rather than answering', async () => {
+    const cache: Record<string, AuditResult> = {};
+    const checkedAt: Record<string, number> = {};
+    const res = await resolveAudit(TOKEN, cache, checkedAt, 1000, [missing(), skipped()]);
+    expect(res).toBeUndefined(); // no badge beats a wrong badge
+    expect(TOKEN in cache).toBe(false);
+    expect(TOKEN in checkedAt).toBe(false);
+  });
+
+  it('falls through a skipped source to one that has the contract', async () => {
+    const log: string[] = [];
+    const res = await resolveAudit(TOKEN, {}, {}, 1000, [
+      counted(skipped(), log, 'a'),
+      counted(found(), log, 'b'),
+    ]);
+    expect(log).toEqual(['a', 'b']);
+    expect(res?.verified).toBe(true);
+  });
+
+  // GoPlus knows an address is verified but cannot hand over the source, so it reports
+  // its own risk read. That verdict must be taken as given, not fed to the scanner —
+  // scanning an empty string would downgrade every such token to 'unknown'.
+  it('takes a verdict source at its word instead of scanning', async () => {
+    const verdict: SourceFetcher = async () => ({
+      status: 'verified',
+      risk: 'caution',
+      flags: ['owner-privileged'],
+    });
+    const cache: Record<string, AuditResult> = {};
+    const res = await resolveAudit(TOKEN, cache, {}, 1000, [missing(), verdict]);
+    expect(res).toEqual({ verified: true, risk: 'caution', flags: ['owner-privileged'] });
+    expect(cache[TOKEN]?.verified).toBe(true); // verified is cached permanently
+  });
+});
+
+// The keyless source that actually closes the gap. Sourcify and BscScan are separate
+// databases, so these mappings are what decide whether a BscScan-verified token gets
+// its ✅.
+describe('goPlusVerdict', () => {
+  it('reads is_open_source=1 as verified', () => {
+    expect(goPlusVerdict({ is_open_source: '1' })?.status).toBe('verified');
+  });
+
+  it('reads is_open_source=0 as a definitive not-found', () => {
+    expect(goPlusVerdict({ is_open_source: '0' })).toEqual({ status: 'not-found' });
+  });
+
+  // An address GoPlus has no record of is ignorance, not evidence. Its response for
+  // one is `{"code":1,"result":{}}` — a success with nothing in it.
+  it('skips rather than voting when the field is missing entirely', () => {
+    expect(goPlusVerdict({})).toEqual({ status: 'skipped' });
+    expect(goPlusVerdict(undefined)).toEqual({ status: 'skipped' });
+  });
+
+  it('maps rug-enabling powers to high risk under the existing flag names', () => {
+    const res = goPlusVerdict({
+      is_open_source: '1',
+      is_mintable: '1',
+      is_blacklisted: '1',
+      transfer_pausable: '1',
+      is_proxy: '1',
+      slippage_modifiable: '1',
+    });
+    expect(res).toMatchObject({ status: 'verified', risk: 'high' });
+    expect(res && 'flags' in res && res.flags).toEqual(
+      expect.arrayContaining(['has-mint', 'blacklist', 'transfer-gate', 'upgradeable', 'settable-tax'])
+    );
+  });
+
+  it('maps a live owner to caution, not high', () => {
+    const res = goPlusVerdict({
+      is_open_source: '1',
+      owner_address: '0xae26ca6dceb56172d2af180aa04b90e54caffb0f',
+    });
+    expect(res).toMatchObject({ status: 'verified', risk: 'caution' });
+  });
+
+  // A renounced contract reports the zero address, which is the ABSENCE of a
+  // privileged owner. Treating the string as truthy would badge every renounced
+  // token 🟡 and make the caution light meaningless.
+  it('does not treat a renounced (zero-address) owner as privileged', () => {
+    const res = goPlusVerdict({
+      is_open_source: '1',
+      owner_address: '0x0000000000000000000000000000000000000000',
+    });
+    expect(res).toEqual({ status: 'verified', risk: 'clean', flags: [] });
+  });
+
+  it('reports clean when every power is off', () => {
+    expect(goPlusVerdict({ is_open_source: '1', is_mintable: '0', is_proxy: '0' })).toEqual({
+      status: 'verified',
+      risk: 'clean',
+      flags: [],
+    });
+  });
 });
 
 // Etherscan is optional: with no key configured it must not fire a request that can
 // only come back "Missing/Invalid API Key". The key is unset in the test env.
+//
+// It reports 'skipped', NOT 'not-found'. That one word is the whole bug: an
+// unconfigured source that claimed "not verified here" gave the chain a second vote it
+// had not earned, and with Sourcify holding only ~80% of BSC the chain then cached
+// "unverified" for every token Sourcify lacked.
 describe('fetchEtherscan without a key', () => {
-  it('reports not-found without touching the network', async () => {
+  it('skips without touching the network, rather than voting not-found', async () => {
     const realFetch = globalThis.fetch;
     let called = false;
     globalThis.fetch = (async () => {
@@ -154,10 +268,91 @@ describe('fetchEtherscan without a key', () => {
       return new Response('', { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      expect(await fetchEtherscan('0x1')).toEqual({ status: 'not-found' });
+      expect(await fetchEtherscan('0x1')).toEqual({ status: 'skipped' });
       expect(called).toBe(false);
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+});
+
+describe('fetchGoPlus', () => {
+  const TOKEN = '0x4E97F33EC3147E63e4027a5daB6d5bB7376478DD';
+  const withFetch = async (
+    impl: (url: string) => Response | Promise<Response>,
+    run: (seen: string[]) => Promise<void>
+  ): Promise<void> => {
+    const realFetch = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      seen.push(String(url));
+      return impl(String(url));
+    }) as unknown as typeof fetch;
+    try {
+      await run(seen);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+
+  const body = (result: unknown): Response =>
+    new Response(JSON.stringify({ code: 1, message: 'OK', result }), { status: 200 });
+
+  // GoPlus keys its result map by the LOWERCASED address whatever case was sent, so a
+  // checksummed address must not be looked up verbatim — that reads as "no record" and
+  // silently costs the token its badge.
+  it('finds the record under the lowercased address even when sent a checksummed one', async () => {
+    await withFetch(
+      () => body({ [TOKEN.toLowerCase()]: { is_open_source: '1' } }),
+      async (seen) => {
+        expect(await fetchGoPlus(TOKEN)).toMatchObject({ status: 'verified' });
+        expect(seen[0]).toContain(TOKEN.toLowerCase());
+      }
+    );
+  });
+
+  it('treats an empty result map as no record rather than unverified', async () => {
+    await withFetch(
+      () => body({}),
+      async () => expect(await fetchGoPlus(TOKEN)).toEqual({ status: 'skipped' })
+    );
+  });
+
+  // A non-1 `code` is GoPlus reporting its own failure at HTTP 200. Cache nothing.
+  it('is transient when GoPlus reports an error code', async () => {
+    await withFetch(
+      () => new Response(JSON.stringify({ code: 4029, message: 'busy' }), { status: 200 }),
+      async () => expect(await fetchGoPlus(TOKEN)).toBeUndefined()
+    );
+  });
+
+  it('is transient on a network failure', async () => {
+    await withFetch(
+      () => {
+        throw new Error('socket hang up');
+      },
+      async () => expect(await fetchGoPlus(TOKEN)).toBeUndefined()
+    );
+  });
+
+  it('retries a rate-limit response before giving up', async () => {
+    await withFetch(
+      () => new Response('', { status: 429 }),
+      async (seen) => {
+        expect(await fetchGoPlus(TOKEN)).toBeUndefined();
+        expect(seen.length).toBe(3);
+      }
+    );
+  });
+
+  // One address per request. A batch silently answers for only some of them.
+  it('asks for exactly one address', async () => {
+    await withFetch(
+      () => body({ [TOKEN.toLowerCase()]: { is_open_source: '1' } }),
+      async (seen) => {
+        await fetchGoPlus(TOKEN);
+        expect(seen[0]?.match(/0x[0-9a-f]{40}/g)?.length).toBe(1);
+      }
+    );
   });
 });

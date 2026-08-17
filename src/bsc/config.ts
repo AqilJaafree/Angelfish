@@ -206,6 +206,28 @@ export const SOURCIFY_API = (
   process.env.BSC_SOURCIFY_API ?? 'https://sourcify.dev/server'
 ).replace(/\/$/, '');
 
+// GoPlus, the KEYLESS source that closes the Sourcify gap.
+//
+// Sourcify and BscScan are separate verification databases: verifying on BscScan does
+// NOT publish to Sourcify. So Sourcify's 404 is "not submitted here", never "not
+// verified" — and on 2026-08-16 all four tokens the board had cached as unverified
+// were open-source on BscScan and 404 on Sourcify. With no Etherscan key configured
+// that left Sourcify as the only voice, so the board badged verified contracts ⚠️.
+//
+// GoPlus answers `is_open_source` from BscScan's own verification state and needs no
+// key, which is what makes the badges right OUT OF THE BOX rather than only for
+// whoever sets up an Etherscan key. It returns no source code, so it reports its risk
+// flags directly (is_mintable, is_blacklisted, transfer_pausable, …) instead of
+// feeding the regex scan — see goPlusVerdict in audit.ts for the mapping.
+//
+// QUERY ONE ADDRESS AT A TIME. The endpoint accepts a comma-separated list but does
+// not answer for all of them: a four-address batch came back with a single entry even
+// with all four already warm in its cache, while the same four asked individually all
+// answered. Batching here silently loses badges.
+export const GOPLUS_API = (
+  process.env.BSC_GOPLUS_API ?? 'https://api.gopluslabs.io/api/v1'
+).replace(/\/$/, '');
+
 // Etherscan's V2 multichain endpoint, used to cover the addresses Sourcify does not
 // have. BscScan's own V1 is retired and answers every request with "You are using a
 // deprecated V1 endpoint". OPTIONAL: it needs a free key from etherscan.io/apis, and
